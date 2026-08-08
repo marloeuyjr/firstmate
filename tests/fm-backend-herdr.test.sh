@@ -3158,6 +3158,20 @@ test_composer_state_claude_unbordered_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯' prompt row (no border box in view) reads empty"
 }
 
+# Trimmed from a 200-line capture in a guarded fm-lab- session on 2026-08-08
+# with Claude Code 2.1.226. Claude's current empty row is `❯` followed by
+# U+00A0 NBSP rather than an ASCII space, between its two separator rows.
+test_composer_state_claude_nbsp_prompt_capture_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n❯\xc2\xa0\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the captured Claude 2.1.226 bare prompt with only NBSP must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: the lab-captured Claude NBSP-only prompt reads empty"
+}
+
 test_composer_state_claude_unbordered_prompt_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-claude-bare-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4325,6 +4339,7 @@ test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
+test_composer_state_claude_nbsp_prompt_capture_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty

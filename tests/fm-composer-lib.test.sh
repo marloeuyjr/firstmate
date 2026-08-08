@@ -87,6 +87,15 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex, ⟩ muse) read empty bordered or bare"
 }
 
+test_claude_prompt_nbsp_is_empty_but_text_is_pending() {
+  local nbsp=$'\302\240' out
+  out=$(classify 0 "❯${nbsp}")
+  [ "$out" = empty ] || fail "a bare claude prompt followed only by Herdr's NBSP must read empty, got '$out'"
+  out=$(classify 0 "❯${nbsp}queued message")
+  [ "$out" = pending ] || fail "a non-whitespace character after Claude's prompt NBSP must remain pending, got '$out'"
+  pass "fm_composer_classify_content: Claude's NBSP-only prompt is empty while non-whitespace content remains pending"
+}
+
 # --- Empty content and idle placeholder -------------------------------------
 
 test_empty_content_is_empty() {
@@ -138,6 +147,7 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_claude_prompt_nbsp_is_empty_but_text_is_pending
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
