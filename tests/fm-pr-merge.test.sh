@@ -9,11 +9,15 @@
 #   (a) merge records pr= and pr_head= before merging, and merges
 #   (b) merge is refused when gh-axi pr merge itself fails (no silent success)
 #   (c) extra gh-axi pr merge args are forwarded after number and --repo
-#   (d) merge is refused before gh-axi when task meta is missing
-#   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
-#   (f) malformed PR URL fails fast without calling gh-axi
-#   (g) explicit merge method is not overridden by the default --squash
-#   (h) repo override args fail fast because the repo comes from the URL
+#   (d) a fully cleaned-up task merges and records its PR in the retained backlog
+#   (e) a matching retained PR remains a single canonical record
+#   (f) a conflicting retained PR is refused before gh-axi
+#   (g) a missing task is refused before gh-axi
+#   (h) a refused merge does not close a cleaned-up task's backlog item
+#   (i) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
+#   (j) malformed PR URL fails fast without calling gh-axi
+#   (k) explicit merge method is not overridden by the default --squash
+#   (l) repo override args fail fast because the repo comes from the URL
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -39,6 +43,17 @@ make_case() {
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
   # one that resolves for cases that want pr_head recorded.
+  printf '%s\n' "$case_dir"
+}
+
+# Build a fresh clean-up fixture with only a retained backlog item.
+# The missing metadata and absent poll artifacts model a task whose cleanup completed.
+make_torn_down_case() {
+  local name=$1 case_dir fakebin
+  case_dir="$TMP_ROOT/$name"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$fakebin"
+  tasks-axi add task-x1 "Torn down task" --kind ship --file "$case_dir/data/backlog.md" >/dev/null
   printf '%s\n' "$case_dir"
 }
 
@@ -88,6 +103,7 @@ run_pr_merge() {
   local case_dir=$1 rc; shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
@@ -156,27 +172,125 @@ test_extra_merge_args_forwarded() {
   pass "fm-pr-merge forwards extra flags to gh-axi pr merge after the -- separator"
 }
 
+test_torn_down_task_merges_and_records_backlog() {
+  local case_dir rc url
+  case_dir=$(make_torn_down_case torn-down-merge)
+  url=https://github.com/example/repo/pull/21
+  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+
+  expect_code 0 "$rc" "torn-down-merge: fm-pr-merge should merge a cleaned-up task"
+  grep -qxF "pr merge 21 --repo example/repo --squash" "$case_dir/gh-axi.log" \
+    || fail "torn-down-merge: gh-axi pr merge was not invoked"
+  assert_grep "$url" "$case_dir/data/backlog.md" \
+    "torn-down-merge: merged PR was not recorded in the retained backlog"
+  [ "$(grep -cF "$url" "$case_dir/data/backlog.md")" -eq 1 ] \
+    || fail "torn-down-merge: retained backlog recorded the PR more than once"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "torn-down-merge: merge recreated task metadata"
+  for artifact in check.sh pr-poll pr-poll-registration pr-poll-retirement; do
+    assert_absent "$case_dir/state/task-x1.$artifact" \
+      "torn-down-merge: merge left a watcher artifact"
+  done
+  pass "fm-pr-merge records a cleaned-up task's merged PR without recreating a watcher poll"
+}
+
+test_torn_down_task_preserves_canonical_backlog_pr() {
+  local case_dir url
+  case_dir=$(make_torn_down_case torn-down-existing-pr)
+  url=https://github.com/example/repo/pull/24
+  tasks-axi update task-x1 --pr "$url" --file "$case_dir/data/backlog.md" >/dev/null
+  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444
+  : > "$case_dir/gh-axi.log"
+
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "torn-down-existing-pr: fm-pr-merge rejected the canonical retained PR"
+
+  [ "$(grep -cF "$url" "$case_dir/data/backlog.md")" -eq 1 ] \
+    || fail "torn-down-existing-pr: matching retained PR was not kept canonical"
+  pass "fm-pr-merge keeps a cleaned-up task's matching PR as one canonical backlog record"
+}
+
+test_torn_down_task_refuses_conflicting_backlog_pr() {
+  local case_dir rc url existing_url
+  case_dir=$(make_torn_down_case torn-down-conflicting-pr)
+  url=https://github.com/example/repo/pull/25
+  existing_url=https://github.com/example/repo/pull/99
+  tasks-axi update task-x1 --pr "$existing_url" --file "$case_dir/data/backlog.md" >/dev/null
+  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-conflicting-pr: fm-pr-merge should refuse a conflicting retained PR"
+  assert_grep 'error: retained backlog item has a conflicting PR link for task-x1' "$case_dir/stderr" \
+    "torn-down-conflicting-pr: refusal did not identify the conflicting record"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "torn-down-conflicting-pr: gh-axi pr merge was invoked"
+  assert_no_grep "$url" "$case_dir/data/backlog.md" \
+    "torn-down-conflicting-pr: requested PR replaced the canonical backlog link"
+  pass "fm-pr-merge refuses a conflicting retained PR before merging"
+}
+
 test_missing_meta_refuses_before_merge() {
-  local case_dir fakebin rc
-  case_dir="$TMP_ROOT/missing-meta"
-  fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  local case_dir rc
+  case_dir=$(make_torn_down_case missing-meta)
   add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
   : > "$case_dir/gh-axi.log"
 
   set +e
-  run_pr_merge "$case_dir" missing-x1 https://github.com/example/repo/pull/21 \
+  run_pr_merge "$case_dir" missing-x1 https://github.com/example/repo/pull/22 \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 1 "$rc" "missing-meta: fm-pr-merge should refuse"
-  assert_grep 'error: task metadata is unavailable' "$case_dir/stderr" \
-    "missing-meta: refusal did not explain missing meta"
+  assert_grep 'error: task metadata is unavailable and no retained backlog item exists for missing-x1' "$case_dir/stderr" \
+    "missing-meta: refusal did not identify the unknown task"
   [ ! -s "$case_dir/gh-axi.log" ] || fail "missing-meta: gh-axi pr merge was invoked"
   assert_absent "$case_dir/state/missing-x1.check.sh" \
-    "missing-meta: fm-pr-check should not arm a poll for an unknown task"
-  pass "fm-pr-merge refuses before merging when task meta is missing"
+    "missing-meta: fm-pr-merge created a poll for an unknown task"
+  pass "fm-pr-merge refuses an unknown task before merging"
+}
+
+test_torn_down_task_merge_failure_does_not_close_backlog() {
+  local case_dir rc url
+  case_dir=$(make_torn_down_case torn-down-merge-refused)
+  url=https://github.com/example/repo/pull/23
+  add_gh_mocks_merge_fails "$case_dir"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-merge-refused: fm-pr-merge should propagate a refused merge"
+  assert_no_grep "$url" "$case_dir/data/backlog.md" \
+    "torn-down-merge-refused: refused merge closed the retained backlog item"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "torn-down-merge-refused: refused merge created a watcher poll"
+  pass "fm-pr-merge leaves a cleaned-up task open when gh-axi refuses the merge"
+}
+
+test_help_describes_cleanup_fallback() {
+  local case_dir rc
+  case_dir=$(make_case help)
+
+  set +e
+  run_pr_merge "$case_dir" --help > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "help: fm-pr-merge --help should succeed"
+  assert_grep 'fully cleaned-up task' "$case_dir/stdout" \
+    "help: cleanup fallback was not described"
+  pass "fm-pr-merge help documents the clean-up fallback"
 }
 
 test_malformed_url_refuses_before_merge() {
@@ -304,7 +418,12 @@ test_parses_pr_url_for_gh_axi() {
 test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
+test_torn_down_task_merges_and_records_backlog
+test_torn_down_task_preserves_canonical_backlog_pr
+test_torn_down_task_refuses_conflicting_backlog_pr
 test_missing_meta_refuses_before_merge
+test_torn_down_task_merge_failure_does_not_close_backlog
+test_help_describes_cleanup_fallback
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
 test_repo_override_args_refuse_before_recording
