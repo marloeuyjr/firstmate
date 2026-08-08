@@ -1021,6 +1021,53 @@ test_submodule_unanchored_head_refuses() {
   pass "teardown preserves an unanchored submodule HEAD and its ordinary refusal"
 }
 
+test_submodule_staged_pointer_is_preserved() {
+  local case_dir rc staged_before staged_after
+  case_dir=$(make_case submodule-staged-pointer)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  anchor_submodule_head_on_origin "$case_dir"
+  git -C "$case_dir/wt" add core/openelis
+  staged_before=$(git -C "$case_dir/wt" diff --cached -- core/openelis)
+  [ -n "$staged_before" ] || fail "submodule-staged-pointer: fixture did not stage the pointer"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "submodule-staged-pointer: teardown must refuse a staged pointer"
+  grep -F "REFUSED: worktree $case_dir/wt has uncommitted changes." "$case_dir/stderr" >/dev/null \
+    || fail "submodule-staged-pointer: teardown did not preserve its ordinary refusal"
+  staged_after=$(git -C "$case_dir/wt" diff --cached -- core/openelis)
+  [ "$staged_before" = "$staged_after" ] \
+    || fail "submodule-staged-pointer: refusal altered the staged pointer"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "submodule-staged-pointer: refusal removed the task record"
+  pass "teardown leaves a staged submodule pointer untouched and keeps its ordinary refusal"
+}
+
+test_submodule_local_branch_anchor_is_restored() {
+  local case_dir rc status
+  case_dir=$(make_case submodule-local-anchor)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  git -C "$case_dir/wt/core/openelis" branch landed-work
+
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -n "$status" ] || fail "submodule-local-anchor: fixture did not create umbrella drift"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "submodule-local-anchor: teardown should restore local-branch-anchored drift"
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -z "$status" ] || fail "submodule-local-anchor: returned slot stayed dirty: $status"
+  pass "teardown restores a clean local-branch-anchored submodule pointer before returning the slot"
+}
+
 test_dirty_worktree_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case dirty-wt)
@@ -2645,6 +2692,8 @@ test_submodule_pointer_drift_on_origin_is_restored
 test_submodule_dirty_inner_tree_refuses
 test_submodule_untracked_inner_files_refuse
 test_submodule_unanchored_head_refuses
+test_submodule_staged_pointer_is_preserved
+test_submodule_local_branch_anchor_is_restored
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
