@@ -268,13 +268,15 @@ add_submodule_pointer_drift() {
 }
 
 anchor_submodule_head_on_origin() {
-  local case_dir=$1 inner="$case_dir/wt/core/openelis"
+  local case_dir=$1 inner
+  inner="$case_dir/wt/core/openelis"
   git -C "$inner" push -q origin HEAD:main
   git -C "$inner" fetch -q origin
 }
 
 embed_submodule_git_dir_in_worktree() {
-  local case_dir=$1 inner="$case_dir/wt/core/openelis" old_git_dir embedded_git_dir exclude
+  local case_dir=$1 inner old_git_dir embedded_git_dir exclude
+  inner="$case_dir/wt/core/openelis"
   old_git_dir=$(git -C "$inner" rev-parse --absolute-git-dir)
   embedded_git_dir="$case_dir/wt/.embedded-submodule-git/core/openelis"
   mkdir -p "$(dirname "$embedded_git_dir")"
