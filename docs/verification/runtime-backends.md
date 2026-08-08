@@ -543,6 +543,7 @@ FM_HERDR_CLAUDE_SUBMIT_LIVE_E2E=1 \
 ```
 
 Its bounded evidence line records the installed Claude and Herdr versions, `agent=claude`, `agent_status=working`, `public_submit=empty`, `literal_sends=1`, `enter_retries=2`, and `queued_transcript=observed`.
+Guard failures report both captured harness versions with the failed behavioral assertion.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:

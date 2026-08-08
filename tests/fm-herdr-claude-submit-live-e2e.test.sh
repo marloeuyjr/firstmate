@@ -8,9 +8,12 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+CLAUDE_VERSION=unavailable
+HERDR_VERSION=unavailable
 
 fail() {
-  printf 'not ok - %s\n' "$1" >&2
+  printf 'not ok - %s [claude=%s herdr=%s]\n' \
+    "$1" "$CLAUDE_VERSION" "$HERDR_VERSION" >&2
   exit 1
 }
 
@@ -22,6 +25,11 @@ for tool in claude herdr jq; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool not found"
 done
 [ -x "$LAB_HELPER" ] || fail "Herdr lab helper not executable at $LAB_HELPER"
+CLAUDE_VERSION=$(claude --version 2>&1) || fail "Claude did not report its version"
+CLAUDE_VERSION=${CLAUDE_VERSION%%$'\n'*}
+HERDR_VERSION=$(herdr --version 2>&1) || fail "Herdr did not report its version"
+HERDR_VERSION=${HERDR_VERSION%%$'\n'*}
+HERDR_VERSION=${HERDR_VERSION#herdr }
 
 SESSION=$("$LAB_HELPER" name fm-claude-submit) || fail "could not allocate guarded Herdr lab name"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-claude-submit.XXXXXX") \
@@ -180,9 +188,6 @@ done
 [ "$QUEUED_TRANSCRIPT" -eq 1 ] \
   || fail "real Claude pane did not show the unique literal in its queued transcript"
 
-CLAUDE_VERSION=$(claude --version | head -n 1)
-HERDR_VERSION=$(PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" status --json \
-  | jq -er '.client.version') || fail "Herdr did not report its version"
 printf 'evidence: claude=%s herdr=%s agent=%s agent_status=%s public_submit=%s literal_sends=%s enter_retries=%s queued_transcript=%s\n' \
   "$CLAUDE_VERSION" "$HERDR_VERSION" "$AGENT" "$AGENT_STATUS" "$VERDICT" "$LITERAL_SENDS" "$ENTER_RETRIES" observed
 pass "real Claude/Herdr public submit confirms one queued literal"
