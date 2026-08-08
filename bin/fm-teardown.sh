@@ -21,12 +21,12 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
 # Before its ordinary dirtiness check, teardown restores an unstaged submodule
 # gitlink drift only when the inner tree is clean and its HEAD is reachable
 # from an origin ref or a local branch ref whose git directory survives removal.
 # Staged gitlink changes, dirty or untracked inner trees, and unanchored inner
 # HEADs remain ordinary uncommitted-change refusals and are never reset.
+# Teardown never treats any remaining uncommitted change as landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -141,7 +141,8 @@ outside the returned worktree.
 Staged pointer changes, dirty or untracked inner trees, and unanchored inner
 HEADs remain uncommitted-work refusals.
 
---force skips ordinary-task dirty and landed-work checks.
+--force skips ordinary-task dirty and landed-work checks, skips scout report
+checks, and discards secondmate child work when retiring a secondmate.
 Use --force only after the captain explicitly authorizes discarding work.
 EOF
 }
