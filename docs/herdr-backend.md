@@ -235,6 +235,7 @@ A working Pi, pending middle row, missing identity, incomplete separator pair, o
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
+Claude's NBSP prompt is empty only when native identity is exactly Claude with a recognized live registration state.
 Claude can render a queued instruction above an empty composer with a dim queue-edit hint, while its first immediate capture can still show the queued text at the prompt.
 The submit verifier resolves that short display lag through its exhausted-retry native Claude identity and working-state confirmation, while the pre-injection guard continues to require an affirmative empty composer.
 
@@ -331,6 +332,7 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-herdr-claude-submit-live-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

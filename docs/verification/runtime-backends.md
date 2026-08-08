@@ -528,10 +528,20 @@ Observed bounded output:
 ```text
 2.1.226 (Claude Code)
 herdr 0.7.5
+agent: claude
 agent_status: working
 ❯ queued lab fixture message
 ❯ Press up to edit queued messages
 ```
+
+The env-gated refresh guard drives the public backend submit dispatcher in a guarded named lab, requires exact native Claude identity, and proves the unique literal is typed once before the bounded Enter retries:
+
+```sh
+FM_HERDR_CLAUDE_SUBMIT_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-herdr-claude-submit-live-e2e.test.sh
+```
+
+Its bounded evidence line records the installed Claude and Herdr versions, `agent=claude`, `agent_status=working`, `public_submit=empty`, `literal_sends=1`, and `enter_retries=2`.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:

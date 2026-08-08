@@ -2848,7 +2848,18 @@ EOF
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
   if [ "$shape" = bare ]; then
     case "$stripped" in
-      '❯'*) stripped=${stripped//$'\302\240'/ } ;;
+      '❯'$'\302\240'*)
+        identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+        IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+        case "$agent:$agent_status" in
+          claude:working|claude:idle|claude:done|claude:blocked)
+            stripped=${stripped/$'\302\240'/ }
+            ;;
+          *) printf 'unknown'; return 0 ;;
+        esac
+        ;;
     esac
     stripped="${stripped#"${stripped%%[![:space:]]*}"}"
     stripped="${stripped%"${stripped##*[![:space:]]}"}"

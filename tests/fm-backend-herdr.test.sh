@@ -3165,6 +3165,7 @@ test_composer_state_claude_nbsp_prompt_capture_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n❯\xc2\xa0\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
@@ -3179,11 +3180,30 @@ test_composer_state_claude_queued_message_hint_is_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-claude-queued-hint"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   printf '\x1b[0m\x1b[38;2;80;80;80m\x1b[48;2;55;55;55m❯ \x1b[0m\x1b[38;2;255;255;255m\x1b[48;2;55;55;55mqueued lab fixture message\x1b[0m\x1b[48;2;55;55;55m                     \x1b[0m\n                                   \x1b[0m\x1b[38;2;153;153;153m◉ xhigh · /effort\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m❯\xc2\xa0\x1b[0m\x1b[2mPress up to edit queued messages\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p1' "$ROOT" )
   [ "$out" = empty ] || fail "the lab-captured Claude queued-message hint must leave the live composer empty, got '$out'"
   pass "fm_backend_herdr_composer_state: the lab-captured Claude queued-message hint leaves the live composer empty"
+}
+
+test_composer_state_claude_nbsp_requires_live_native_identity() {
+  local case_id dir log resp fb out
+  for case_id in missing non-claude stale; do
+    dir="$TMP_ROOT/composer-claude-nbsp-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '❯\xc2\xa0\n$ \n' > "$resp/1.out"
+    case "$case_id" in
+      missing) printf '1\n' > "$resp/2.exit" ;;
+      non-claude) printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      stale) printf '{"result":{"agent":{"agent":"claude"}}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr lab:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "a $case_id native identity must not authorize a stale Claude NBSP row above a shell prompt, got '$out'"
+  done
+  pass "fm_backend_composer_state: Claude NBSP emptiness requires live exact native identity"
 }
 
 test_composer_state_claude_unbordered_prompt_is_pending() {
@@ -3523,11 +3543,14 @@ test_send_text_submit_busy_claude_queue_survives_indicator_lag() {
   local dir log resp fb out enter_count read_count text_count busy_count
   dir="$TMP_ROOT/submit-busy-claude-queue"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # 1: send-text; 2: baseline working; 3: Enter; 4: immediate queued capture;
-  # 5: retry Enter; 6: still-lagging capture; 7: final native busy fallback.
+  # 5: live Claude identity; 6: retry Enter; 7: still-lagging capture;
+  # 8: live Claude identity; 9: final native busy fallback.
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
   printf '\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m❯\xc2\xa0queued lab fixture message\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/4.out"
-  cp "$resp/4.out" "$resp/6.out"
-  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/5.out"
+  cp "$resp/4.out" "$resp/7.out"
+  cp "$resp/5.out" "$resp/8.out"
+  cp "$resp/5.out" "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "queued lab fixture message" 2 0.01 0.01' "$ROOT" )
@@ -3539,7 +3562,7 @@ test_send_text_submit_busy_claude_queue_survives_indicator_lag() {
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
   [ "$read_count" -eq 2 ] || fail "the busy queued-send path should inspect each lagging composer read, made $read_count reads"
   busy_count=$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "$log")
-  [ "$busy_count" -eq 2 ] || fail "the busy queued-send path should read native state for its baseline and final fallback, made $busy_count agent reads"
+  [ "$busy_count" -eq 4 ] || fail "the busy queued-send path should corroborate each Claude composer read plus its baseline and final fallback, made $busy_count agent reads"
   pass "fm_backend_herdr_send_text_submit: a lab-captured busy Claude queue survives indicator lag without retyping the message"
 }
 
@@ -4390,6 +4413,7 @@ test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_nbsp_prompt_capture_is_empty
 test_composer_state_claude_queued_message_hint_is_empty
+test_composer_state_claude_nbsp_requires_live_native_identity
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
