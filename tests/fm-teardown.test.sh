@@ -240,6 +240,39 @@ wt_commit_file() {
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
 }
 
+# Add an initialized submodule, then advance only its inner HEAD.
+# The umbrella index remains on the recorded baseline pointer.
+add_submodule_pointer_drift() {
+  local case_dir=$1 inner
+  git init -q --bare "$case_dir/submodule-origin.git"
+  git -C "$case_dir/submodule-origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/submodule-origin.git" "$case_dir/submodule-seed" 2>/dev/null
+  printf '%s\n' baseline > "$case_dir/submodule-seed/README.md"
+  git -C "$case_dir/submodule-seed" add README.md
+  git -C "$case_dir/submodule-seed" -c user.email=t@t -c user.name=t commit -q -m baseline
+  git -C "$case_dir/submodule-seed" push -q origin main
+  rm -rf "$case_dir/submodule-seed"
+
+  git -C "$case_dir/project" -c protocol.file.allow=always submodule add -q \
+    "$case_dir/submodule-origin.git" core/openelis
+  git -C "$case_dir/project" add .gitmodules core/openelis
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -q -m "add submodule"
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/wt" merge -q --ff-only main
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive
+
+  inner="$case_dir/wt/core/openelis"
+  printf '%s\n' landed > "$inner/landed.txt"
+  git -C "$inner" add landed.txt
+  git -C "$inner" -c user.email=t@t -c user.name=t commit -q -m "inner landed work"
+}
+
+anchor_submodule_head_on_origin() {
+  local case_dir=$1 inner="$case_dir/wt/core/openelis"
+  git -C "$inner" push -q origin HEAD:main
+  git -C "$inner" fetch -q origin
+}
+
 # Land <file>=<content> as a single commit on origin's default branch, simulating a
 # squash merge whose net change matches the task branch but whose commit differs.
 # After this, the branch's content is in origin/main even though the branch's own
@@ -904,6 +937,88 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+test_submodule_pointer_drift_on_origin_is_restored() {
+  local case_dir rc status
+  case_dir=$(make_case submodule-pointer-origin)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  anchor_submodule_head_on_origin "$case_dir"
+
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -n "$status" ] || fail "submodule-pointer-origin: fixture did not create umbrella drift"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "submodule-pointer-origin: teardown should restore landed pointer drift"
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -z "$status" ] || fail "submodule-pointer-origin: returned slot stayed dirty: $status"
+  pass "teardown restores a clean origin-anchored submodule pointer before returning the slot"
+}
+
+test_submodule_dirty_inner_tree_refuses() {
+  local case_dir rc
+  case_dir=$(make_case submodule-dirty-inner)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  anchor_submodule_head_on_origin "$case_dir"
+  printf '%s\n' unlanded > "$case_dir/wt/core/openelis/unlanded.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "submodule-dirty-inner: teardown must refuse inner edits"
+  grep -F "REFUSED: worktree $case_dir/wt has uncommitted changes." "$case_dir/stderr" >/dev/null \
+    || fail "submodule-dirty-inner: teardown did not preserve its ordinary refusal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "submodule-dirty-inner: refusal removed the task record"
+  pass "teardown preserves a dirty inner submodule tree and its ordinary refusal"
+}
+
+test_submodule_untracked_inner_files_refuse() {
+  local case_dir rc
+  case_dir=$(make_case submodule-untracked-inner)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  anchor_submodule_head_on_origin "$case_dir"
+  printf '%s\n' untracked > "$case_dir/wt/core/openelis/untracked.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "submodule-untracked-inner: teardown must refuse untracked inner files"
+  grep -F "REFUSED: worktree $case_dir/wt has uncommitted changes." "$case_dir/stderr" >/dev/null \
+    || fail "submodule-untracked-inner: teardown did not preserve its ordinary refusal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "submodule-untracked-inner: refusal removed the task record"
+  pass "teardown preserves untracked inner submodule files and its ordinary refusal"
+}
+
+test_submodule_unanchored_head_refuses() {
+  local case_dir rc
+  case_dir=$(make_case submodule-unanchored-head)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "submodule-unanchored-head: teardown must refuse an unanchored inner HEAD"
+  grep -F "REFUSED: worktree $case_dir/wt has uncommitted changes." "$case_dir/stderr" >/dev/null \
+    || fail "submodule-unanchored-head: teardown did not preserve its ordinary refusal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "submodule-unanchored-head: refusal removed the task record"
+  pass "teardown preserves an unanchored submodule HEAD and its ordinary refusal"
 }
 
 test_dirty_worktree_refuses() {
@@ -2526,6 +2641,10 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_submodule_pointer_drift_on_origin_is_restored
+test_submodule_dirty_inner_tree_refuses
+test_submodule_untracked_inner_files_refuse
+test_submodule_unanchored_head_refuses
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
