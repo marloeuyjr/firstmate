@@ -273,6 +273,18 @@ anchor_submodule_head_on_origin() {
   git -C "$inner" fetch -q origin
 }
 
+embed_submodule_git_dir_in_worktree() {
+  local case_dir=$1 inner="$case_dir/wt/core/openelis" old_git_dir embedded_git_dir exclude
+  old_git_dir=$(git -C "$inner" rev-parse --absolute-git-dir)
+  embedded_git_dir="$case_dir/wt/.embedded-submodule-git/core/openelis"
+  mkdir -p "$(dirname "$embedded_git_dir")"
+  mv "$old_git_dir" "$embedded_git_dir"
+  git config --file "$embedded_git_dir/config" core.worktree "$inner"
+  printf 'gitdir: %s\n' "$embedded_git_dir" > "$inner/.git"
+  exclude=$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)
+  printf '/.embedded-submodule-git/\n' >> "$exclude"
+}
+
 # Land <file>=<content> as a single commit on origin's default branch, simulating a
 # squash merge whose net change matches the task branch but whose commit differs.
 # After this, the branch's content is in origin/main even though the branch's own
@@ -1048,11 +1060,15 @@ test_submodule_staged_pointer_is_preserved() {
 }
 
 test_submodule_local_branch_anchor_is_restored() {
-  local case_dir rc status
+  local case_dir rc status git_dir
   case_dir=$(make_case submodule-local-anchor)
   write_meta "$case_dir" no-mistakes ship
   add_submodule_pointer_drift "$case_dir"
   git -C "$case_dir/wt/core/openelis" branch landed-work
+  git_dir=$(git -C "$case_dir/wt/core/openelis" rev-parse --absolute-git-dir)
+  case "$git_dir" in
+    "$case_dir/wt"|"$case_dir/wt"/*) fail "submodule-local-anchor: fixture git dir is not external" ;;
+  esac
 
   status=$(git -C "$case_dir/wt" status --porcelain)
   [ -n "$status" ] || fail "submodule-local-anchor: fixture did not create umbrella drift"
@@ -1066,6 +1082,36 @@ test_submodule_local_branch_anchor_is_restored() {
   status=$(git -C "$case_dir/wt" status --porcelain)
   [ -z "$status" ] || fail "submodule-local-anchor: returned slot stayed dirty: $status"
   pass "teardown restores a clean local-branch-anchored submodule pointer before returning the slot"
+}
+
+test_embedded_submodule_git_dir_refuses_local_only_anchor() {
+  local case_dir rc head_before head_after git_dir
+  case_dir=$(make_case embedded-submodule-local-anchor)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  git -C "$case_dir/wt/core/openelis" branch landed-work
+  embed_submodule_git_dir_in_worktree "$case_dir"
+  git_dir=$(git -C "$case_dir/wt/core/openelis" rev-parse --absolute-git-dir)
+  case "$git_dir" in
+    "$case_dir/wt"|"$case_dir/wt"/*) ;;
+    *) fail "embedded-submodule-local-anchor: fixture git dir is not embedded" ;;
+  esac
+  head_before=$(git -C "$case_dir/wt/core/openelis" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "embedded-submodule-local-anchor: teardown must refuse a non-surviving local anchor"
+  grep -F "REFUSED: worktree $case_dir/wt has uncommitted changes." "$case_dir/stderr" >/dev/null \
+    || fail "embedded-submodule-local-anchor: teardown did not preserve its ordinary refusal"
+  head_after=$(git -C "$case_dir/wt/core/openelis" rev-parse HEAD)
+  [ "$head_before" = "$head_after" ] \
+    || fail "embedded-submodule-local-anchor: refusal reset the inner HEAD"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "embedded-submodule-local-anchor: refusal removed the task record"
+  pass "teardown refuses a local-only anchor whose git directory is removed with the worktree"
 }
 
 test_dirty_worktree_refuses() {
@@ -2694,6 +2740,7 @@ test_submodule_untracked_inner_files_refuse
 test_submodule_unanchored_head_refuses
 test_submodule_staged_pointer_is_preserved
 test_submodule_local_branch_anchor_is_restored
+test_embedded_submodule_git_dir_refuses_local_only_anchor
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
