@@ -190,13 +190,8 @@ fm_composer_idle_matches() {
 }
 
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
-  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content nbsp
+  local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
-  # Claude's Herdr composer leaves U+00A0 after its otherwise bare prompt.
-  # Normalize it before trimming so whitespace-only prompts remain empty.
-  nbsp=$'\302\240'
-  content=${content//"$nbsp"/ }
-  plain_content=${plain_content//"$nbsp"/ }
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›'|'⟩') printf 'empty'; return 0 ;;

@@ -3527,7 +3527,7 @@ test_send_text_submit_busy_claude_queue_survives_indicator_lag() {
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
   printf '\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m❯\xc2\xa0queued lab fixture message\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/4.out"
   cp "$resp/4.out" "$resp/6.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "queued lab fixture message" 2 0.01 0.01' "$ROOT" )
@@ -3541,6 +3541,30 @@ test_send_text_submit_busy_claude_queue_survives_indicator_lag() {
   busy_count=$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "$log")
   [ "$busy_count" -eq 2 ] || fail "the busy queued-send path should read native state for its baseline and final fallback, made $busy_count agent reads"
   pass "fm_backend_herdr_send_text_submit: a lab-captured busy Claude queue survives indicator lag without retyping the message"
+}
+
+test_send_text_submit_non_claude_busy_with_persistent_content_stays_pending() {
+  local label dir log resp fb out enter_count read_count
+  for label in codex unknown; do
+    dir="$TMP_ROOT/submit-busy-$label-persistent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+    printf '  \xe2\x80\xba persistent message\n' > "$resp/4.out"
+    cp "$resp/4.out" "$resp/6.out"
+    if [ "$label" = codex ]; then
+      printf '{"result":{"agent":{"agent":"codex","agent_status":"working"}}}\n' > "$resp/7.out"
+    else
+      printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+    fi
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "persistent message" 2 0.01 0.01' "$ROOT" )
+    [ "$out" = pending ] || fail "a $label busy pane with persistent composer text must remain pending, got '$out'"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    [ "$enter_count" -eq 2 ] || fail "a $label busy pane should consume the configured Enter budget, sent $enter_count Enter(s)"
+    read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+    [ "$read_count" -eq 2 ] || fail "a $label busy pane should preserve both conservative composer reads, made $read_count read(s)"
+  done
+  pass "fm_backend_herdr_send_text_submit: non-Claude and unknown busy panes remain pending"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -4387,6 +4411,7 @@ test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
 test_send_text_submit_busy_claude_queue_survives_indicator_lag
+test_send_text_submit_non_claude_busy_with_persistent_content_stays_pending
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
