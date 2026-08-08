@@ -508,6 +508,8 @@ The queued-message capture showed an echoed `❯ queued lab fixture message` abo
 An immediate capture after Enter instead still showed `❯ queued lab fixture message` at the composer row, while native agent state remained `working`.
 
 ```sh
+claude --version
+herdr --version
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
 session=$("$HERDR_LAB_HELPER" name fm-afk-herdr-claude-inject)
 trap '"$HERDR_LAB_HELPER" teardown "$session"' EXIT
