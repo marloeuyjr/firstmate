@@ -1033,6 +1033,29 @@ test_submodule_unanchored_head_refuses() {
   pass "teardown preserves an unanchored submodule HEAD and its ordinary refusal"
 }
 
+test_submodule_ignore_all_does_not_hide_unanchored_head() {
+  local case_dir rc status
+  case_dir=$(make_case submodule-ignore-all-unanchored)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  git -C "$case_dir/wt" config submodule.core/openelis.ignore all
+
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -z "$status" ] || fail "submodule-ignore-all-unanchored: fixture did not hide umbrella drift"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "submodule-ignore-all-unanchored: teardown must refuse hidden unanchored drift"
+  grep -F "REFUSED: worktree $case_dir/wt has uncommitted changes." "$case_dir/stderr" >/dev/null \
+    || fail "submodule-ignore-all-unanchored: teardown did not preserve its ordinary refusal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "submodule-ignore-all-unanchored: refusal removed the task record"
+  pass "teardown safety ignores submodule ignore configuration when checking unanchored drift"
+}
+
 test_submodule_staged_pointer_is_preserved() {
   local case_dir rc staged_before staged_after
   case_dir=$(make_case submodule-staged-pointer)
@@ -2738,6 +2761,7 @@ test_submodule_pointer_drift_on_origin_is_restored
 test_submodule_dirty_inner_tree_refuses
 test_submodule_untracked_inner_files_refuse
 test_submodule_unanchored_head_refuses
+test_submodule_ignore_all_does_not_hide_unanchored_head
 test_submodule_staged_pointer_is_preserved
 test_submodule_local_branch_anchor_is_restored
 test_embedded_submodule_git_dir_refuses_local_only_anchor

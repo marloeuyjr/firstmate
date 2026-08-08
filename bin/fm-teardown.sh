@@ -1168,7 +1168,7 @@ validate_worktree_teardown_safety() {
 
   restore_landed_submodule_pointer_drift || return 1
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi
