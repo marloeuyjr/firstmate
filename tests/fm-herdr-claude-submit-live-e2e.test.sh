@@ -49,8 +49,21 @@ WORKSPACE=$("$LAB_HELPER" run "$SESSION" workspace create --cwd "$ROOT" --label 
   || fail "could not create Claude submit workspace"
 PANE=$(printf '%s' "$WORKSPACE" | jq -er '.result.root_pane.pane_id') \
   || fail "workspace create did not return a pane id"
-"$LAB_HELPER" run "$SESSION" agent start fixture-claude --kind claude --pane "$PANE" --timeout 300000 >/dev/null \
-  || fail "could not start real Claude in the guarded Herdr lab"
+AGENT_STARTED=0
+for _ in $(seq 1 40); do
+  if START_OUT=$("$LAB_HELPER" run "$SESSION" agent start fixture-claude \
+    --kind claude --pane "$PANE" --timeout 300000 2>&1); then
+    AGENT_STARTED=1
+    break
+  fi
+  printf '%s\n' "$START_OUT" | grep -F '"code":"agent_pane_busy"' >/dev/null \
+    || fail "could not start real Claude in the guarded Herdr lab: $START_OUT"
+  sleep 0.25
+done
+[ "$AGENT_STARTED" -eq 1 ] || fail "guarded Herdr pane did not become available for Claude"
+
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
 
 IDENTITY=
 for _ in $(seq 1 120); do
@@ -61,12 +74,46 @@ for _ in $(seq 1 120); do
 done
 [ "${AGENT:-}" = claude ] || fail "real Herdr agent identity did not become claude"
 
+COMPOSER_READY=0
+COMPOSER_EMPTY_READS=0
+for _ in $(seq 1 120); do
+  COMPOSER_STATE=$(fm_backend_composer_state herdr "$SESSION:$PANE")
+  if [ "$COMPOSER_STATE" = empty ]; then
+    COMPOSER_EMPTY_READS=$((COMPOSER_EMPTY_READS + 1))
+    if [ "$COMPOSER_EMPTY_READS" -ge 3 ]; then
+      COMPOSER_READY=1
+      break
+    fi
+  else
+    COMPOSER_EMPTY_READS=0
+  fi
+  sleep 0.25
+done
+[ "$COMPOSER_READY" -eq 1 ] || fail "real Claude composer did not become stably empty"
+
 "$LAB_HELPER" run "$SESSION" agent prompt "$PANE" \
-  'Use the Bash tool to run sleep 60, then reply with exactly done. Begin now.' \
-  --wait --until working --timeout 30000 >/dev/null \
-  || fail "real Claude did not enter working state"
-IDENTITY=$("$LAB_HELPER" run "$SESSION" agent get "$PANE") \
-  || fail "could not read real Claude native identity"
+  'Use the Bash tool to run sleep 60, then reply with exactly done. Begin now.' >/dev/null \
+  || fail "could not submit the real Claude seed prompt"
+AGENT_WORKING=0
+for seed_attempt in 0 1 2; do
+  for _ in $(seq 1 20); do
+    IDENTITY=$("$LAB_HELPER" run "$SESSION" agent get "$PANE" 2>/dev/null || true)
+    AGENT=$(printf '%s' "$IDENTITY" | jq -r '.result.agent.agent // empty' 2>/dev/null)
+    AGENT_STATUS=$(printf '%s' "$IDENTITY" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
+    if [ "$AGENT" = claude ] && [ "$AGENT_STATUS" = working ]; then
+      AGENT_WORKING=1
+      break 2
+    fi
+    sleep 0.25
+  done
+  [ "$seed_attempt" -lt 2 ] || break
+  SEED_COMPOSER=$(fm_backend_composer_state herdr "$SESSION:$PANE")
+  [ "$SEED_COMPOSER" = pending ] \
+    || fail "real Claude seed was not pending before Enter retry: $SEED_COMPOSER"
+  "$LAB_HELPER" run "$SESSION" pane send-keys "$PANE" enter >/dev/null \
+    || fail "could not retry Enter for the real Claude seed"
+done
+[ "$AGENT_WORKING" -eq 1 ] || fail "real Claude did not enter working state"
 AGENT=$(printf '%s' "$IDENTITY" | jq -er '.result.agent.agent') \
   || fail "native agent output omitted agent identity"
 AGENT_STATUS=$(printf '%s' "$IDENTITY" | jq -er '.result.agent.agent_status') \
@@ -109,8 +156,6 @@ PATH="\$real_path" exec "\$helper" run "\$session" "\${args[@]}"
 EOF
 chmod +x "$FAKEBIN/herdr"
 
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-backend.sh"
 VERDICT=$(PATH="$FAKEBIN:$ORIGINAL_PATH" HERDR_SESSION="$SESSION" \
   fm_backend_send_text_submit herdr "$SESSION:$PANE" "$MESSAGE" 2 0.01 0.01)
 [ "$VERDICT" = empty ] || fail "public Herdr submit returned $VERDICT instead of empty"
@@ -121,9 +166,23 @@ ENTER_RETRIES=$(awk -F '\t' -v pane="$PANE" \
   '$1 == "enter" && $2 == pane { count++ } END { print count + 0 }' "$CALL_LOG")
 [ "$ENTER_RETRIES" -eq 2 ] || fail "public submit used $ENTER_RETRIES Enter attempts instead of 2"
 
+QUEUED_TRANSCRIPT=0
+for _ in $(seq 1 100); do
+  REAL_CAPTURE=$(PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" \
+    pane read "$PANE" --source recent --lines 200 2>/dev/null || true)
+  if printf '%s\n' "$REAL_CAPTURE" | grep -F "$MESSAGE" >/dev/null \
+    && printf '%s\n' "$REAL_CAPTURE" | grep -F 'Press up to edit queued messages' >/dev/null; then
+    QUEUED_TRANSCRIPT=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$QUEUED_TRANSCRIPT" -eq 1 ] \
+  || fail "real Claude pane did not show the unique literal in its queued transcript"
+
 CLAUDE_VERSION=$(claude --version | head -n 1)
 HERDR_VERSION=$(PATH="$ORIGINAL_PATH" "$LAB_HELPER" run "$SESSION" status --json \
   | jq -er '.client.version') || fail "Herdr did not report its version"
-printf 'evidence: claude=%s herdr=%s agent=%s agent_status=%s public_submit=%s literal_sends=%s enter_retries=%s\n' \
-  "$CLAUDE_VERSION" "$HERDR_VERSION" "$AGENT" "$AGENT_STATUS" "$VERDICT" "$LITERAL_SENDS" "$ENTER_RETRIES"
+printf 'evidence: claude=%s herdr=%s agent=%s agent_status=%s public_submit=%s literal_sends=%s enter_retries=%s queued_transcript=%s\n' \
+  "$CLAUDE_VERSION" "$HERDR_VERSION" "$AGENT" "$AGENT_STATUS" "$VERDICT" "$LITERAL_SENDS" "$ENTER_RETRIES" observed
 pass "real Claude/Herdr public submit confirms one queued literal"

@@ -516,7 +516,8 @@ workspace=$("$HERDR_LAB_HELPER" run "$session" workspace create --cwd "$PWD" --l
 pane=$(printf '%s' "$workspace" | jq -r '.result.root_pane.pane_id')
 sleep 3
 "$HERDR_LAB_HELPER" run "$session" agent start fixture-claude --kind claude --pane "$pane" --timeout 300000
-"$HERDR_LAB_HELPER" run "$session" agent prompt "$pane" 'Use the Bash tool to run sleep 60, then reply with exactly done. Begin now.' --wait --until working --timeout 30000
+"$HERDR_LAB_HELPER" run "$session" agent prompt "$pane" 'Use the Bash tool to run sleep 60, then reply with exactly done. Begin now.'
+"$HERDR_LAB_HELPER" run "$session" pane send-keys "$pane" enter
 "$HERDR_LAB_HELPER" run "$session" pane send-text "$pane" 'queued lab fixture message'
 "$HERDR_LAB_HELPER" run "$session" pane send-keys "$pane" enter
 "$HERDR_LAB_HELPER" run "$session" agent get "$pane"
@@ -534,14 +535,14 @@ agent_status: working
 ❯ Press up to edit queued messages
 ```
 
-The env-gated refresh guard drives the public backend submit dispatcher in a guarded named lab, requires exact native Claude identity, and proves the unique literal is typed once before the bounded Enter retries:
+The env-gated refresh guard drives the public backend submit dispatcher in a guarded named lab, requires exact native Claude identity, proves the unique literal is typed once before the bounded Enter retries, then polls the unshimmed pane until that literal appears with Claude's queued-message hint:
 
 ```sh
 FM_HERDR_CLAUDE_SUBMIT_LIVE_E2E=1 \
   bin/fm-test-run.sh tests/fm-herdr-claude-submit-live-e2e.test.sh
 ```
 
-Its bounded evidence line records the installed Claude and Herdr versions, `agent=claude`, `agent_status=working`, `public_submit=empty`, `literal_sends=1`, and `enter_retries=2`.
+Its bounded evidence line records the installed Claude and Herdr versions, `agent=claude`, `agent_status=working`, `public_submit=empty`, `literal_sends=1`, `enter_retries=2`, and `queued_transcript=observed`.
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
