@@ -2926,9 +2926,13 @@ EOF
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
-# literally "the composer read empty".
+# literally "the composer read empty". A working baseline may accept an Enter
+# as a queued message before its rendered queue indicator appears, so after the
+# normal Enter-only retry budget a still-proven-pending composer is accepted
+# when the native state remains busy. This mirrors tmux's busy fallback and
+# prevents fm-send from retyping an already queued instruction.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep busy_state
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2950,8 +2954,18 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # The classifier has positively identified real text, but a busy agent can
+  # have accepted it into its queue while Claude's rendered queue indicator is
+  # still lagging the first immediate pane read. Re-read native state only at
+  # the exhausted-retry boundary, matching tmux's busy-queue fallback.
+  busy_state=$(fm_backend_herdr_busy_state "$target")
+  if [ "$verdict" = pending ] && [ "$busy_state" = busy ]; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
