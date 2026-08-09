@@ -21,7 +21,12 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# Uncommitted changes are never landed.
+# Before its ordinary dirtiness check, teardown restores an unstaged submodule
+# gitlink drift only when the inner tree is clean and its HEAD is reachable
+# from an origin ref or a local branch ref whose git directory survives removal.
+# Staged gitlink changes, dirty or untracked inner trees, and unanchored inner
+# HEADs remain ordinary uncommitted-change refusals and are never reset.
+# Teardown never treats any remaining uncommitted change as landed.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -122,6 +127,32 @@
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
 set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: fm-teardown.sh <task-id> [--force]
+
+Tear down a finished task after verifying that its work has landed.
+
+Before checking ordinary uncommitted changes, teardown restores an unstaged
+submodule pointer drift when the submodule's inner tree is clean and its HEAD
+is reachable from an origin ref or a local branch ref whose git directory is
+outside the returned worktree.
+Staged pointer changes, dirty or untracked inner trees, and unanchored inner
+HEADs remain uncommitted-work refusals.
+
+--force skips ordinary-task dirty and landed-work checks, skips scout report
+checks, and discards secondmate child work when retiring a secondmate.
+Use --force only after the captain explicitly authorizes discarding work.
+EOF
+}
+
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -1069,6 +1100,65 @@ teardown_treehouse_return() {
   return 1
 }
 
+restore_landed_submodule_pointer_drift() {
+  local config_entry path wt_abs submodule submodule_head submodule_git_dir inner_status diff_rc pipeline_rc local_anchor_survives
+  [ -f "$WT/.gitmodules" ] || return 0
+  wt_abs=$(canonical_existing_dir "$WT") || return 0
+  git -C "$WT" config --file .gitmodules --get-regexp '^submodule\..*\.path$' >/dev/null 2>&1 \
+    || return 0
+
+  git -C "$WT" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$' |
+    while IFS= read -r -d '' config_entry; do
+      path=${config_entry#*$'\n'}
+      [ -n "$path" ] || continue
+      submodule=$(canonical_existing_dir "$WT/$path") || continue
+      case "$submodule" in
+        "$wt_abs"/*) ;;
+        *) continue ;;
+      esac
+      git -C "$submodule" rev-parse --git-dir >/dev/null 2>&1 || continue
+      git -C "$WT" ls-files --stage -- "$path" | grep -q '^160000 ' || continue
+      if git -C "$WT" diff --cached --quiet -- "$path"; then
+        :
+      else
+        continue
+      fi
+      if git -C "$WT" diff --quiet --ignore-submodules=dirty -- "$path"; then
+        continue
+      else
+        diff_rc=$?
+      fi
+      [ "$diff_rc" -eq 1 ] || continue
+      if ! inner_status=$(git -C "$submodule" status --porcelain --untracked-files=all); then
+        continue
+      fi
+      [ -z "$inner_status" ] || continue
+      submodule_head=$(git -C "$submodule" rev-parse --verify HEAD 2>/dev/null) || continue
+      submodule_git_dir=$(git -C "$submodule" rev-parse --absolute-git-dir 2>/dev/null) || continue
+      submodule_git_dir=$(canonical_existing_dir "$submodule_git_dir") || continue
+      local_anchor_survives=1
+      case "$submodule_git_dir" in
+        "$wt_abs"|"$wt_abs"/*) local_anchor_survives=0 ;;
+      esac
+      if git -C "$submodule" for-each-ref --contains="$submodule_head" --format='%(refname)' \
+          refs/remotes/origin | grep -q .; then
+        :
+      elif [ "$local_anchor_survives" -eq 1 ] && \
+          git -C "$submodule" for-each-ref --contains="$submodule_head" --format='%(refname)' \
+            refs/heads | grep -q .; then
+        :
+      else
+        continue
+      fi
+      if ! git -C "$WT" submodule update --no-fetch --checkout -- "$path" </dev/null; then
+        echo "REFUSED: cannot restore landed submodule pointer $path in $WT." >&2
+        exit 1
+      fi
+    done
+  pipeline_rc=${PIPESTATUS[1]}
+  return "$pipeline_rc"
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1077,7 +1167,9 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+  restore_landed_submodule_pointer_drift || return 1
+
+  if ! dirty_raw=$(git -C "$WT" status --porcelain --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
       return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
     fi

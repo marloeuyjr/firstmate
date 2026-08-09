@@ -28,7 +28,7 @@ Hard rules, in priority order:
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation for routine decisions; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never tear down unlanded work.**
-   Uncommitted changes are never landed, and `bin/fm-teardown.sh` owns the complete landed-work test.
+   `bin/fm-teardown.sh`'s header owns its pre-check normalization and the complete landed-work test; any uncommitted change that remains is never landed.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work.
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
 4. **Crewmates never address the captain.**
