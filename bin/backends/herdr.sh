@@ -2846,6 +2846,24 @@ EOF
   stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  if [ "$shape" = bare ]; then
+    case "$stripped" in
+      '❯'$'\302\240'*)
+        identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+        IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+        case "$agent:$agent_status" in
+          claude:working|claude:idle|claude:done|claude:blocked)
+            stripped=${stripped/$'\302\240'/ }
+            ;;
+          *) printf 'unknown'; return 0 ;;
+        esac
+        ;;
+    esac
+    stripped="${stripped#"${stripped%%[![:space:]]*}"}"
+    stripped="${stripped%"${stripped##*[![:space:]]}"}"
+  fi
   if [ "$shape" = bordered ]; then
     bordered=1
     stripped=${stripped//│/}
@@ -2926,9 +2944,12 @@ EOF
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
 # each backend confirms it is an internal decision, and herdr's is no longer
-# literally "the composer read empty".
+# literally "the composer read empty". A working Claude baseline may accept an
+# Enter as a queued message before its rendered queue indicator appears, so
+# after the normal Enter-only retry budget a still-proven-pending composer is
+# accepted only when native identity is exactly Claude and remains working.
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep identity agent agent_status
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2950,8 +2971,20 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       unknown) printf 'unknown'; return 0 ;;
     esac
     i=$((i + 1))
-    [ "$i" -lt "$retries" ] || { printf 'pending'; return 0; }
+    [ "$i" -lt "$retries" ] || break
   done
+  # The classifier has positively identified real text, but a busy Claude can
+  # have accepted it into its queue while its rendered queue indicator lags.
+  # Re-read native identity only at the exhausted-retry boundary.
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true)
+  IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+  if [ "$verdict" = pending ] && [ "$agent:$agent_status" = claude:working ]; then
+    printf 'empty'
+  else
+    printf 'pending'
+  fi
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors

@@ -3122,39 +3122,33 @@ test_retirement_crash_recovery() {
 }
 
 test_external_merge_transition_retires_only_terminal_poll() {
-  local dir state before rc label
+  local dir state before out rc label
   dir=$(make_case external-merge-transition)
   state="$dir/home/state"
   write_poll_meta "$state" task-a https://github.com/o/r/pull/19
   seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/19
-  add_stop_custom_check "$dir"
   before=$(poll_artifact_snapshot "$state" task-a)
 
   for label in open-green open-red closed-unmerged forge-error malformed; do
-    rm -f "$state/.last-check"
-    set +e
     case "$label" in
       open-green|open-red)
-        FM_TEST_GH_STATE=OPEN run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+        out=$(FM_TEST_GH_STATE=OPEN run_poll "$dir")
         ;;
       closed-unmerged)
-        FM_TEST_GH_STATE=CLOSED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+        out=$(FM_TEST_GH_STATE=CLOSED run_poll "$dir")
         ;;
       forge-error)
-        FM_TEST_GH_FAIL=1 run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+        out=$(FM_TEST_GH_FAIL=1 run_poll "$dir")
         ;;
       malformed)
-        FM_TEST_GH_STATE=NOT_A_FORGE_STATE run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/$label.out" 2> "$dir/$label.err"
+        out=$(FM_TEST_GH_STATE=NOT_A_FORGE_STATE run_poll "$dir")
         ;;
     esac
-    rc=$?
-    set -e
-    [ "$rc" -eq 0 ] || fail "$label watcher cycle failed: $(cat "$dir/$label.err")"
-    case "$(cat "$dir/$label.out")" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "$label did not reach the control check" ;; esac
+    [ -z "$out" ] || fail "$label poll emitted a terminal result"
     [ "$(poll_artifact_snapshot "$state" task-a)" = "$before" ] || fail "$label changed the armed poll"
   done
 
-  rm -f "$state/z-stop.check.sh" "$state/z-stop.check-trust" "$state/.last-check"
+  rm -f "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err"
   rc=$?

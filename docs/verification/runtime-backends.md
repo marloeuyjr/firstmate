@@ -503,6 +503,50 @@ Real captures verified these active distinctions:
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
 
+Claude Code 2.1.226 and Herdr 0.7.5 were reverified on 2026-08-08 in a guarded named lab.
+The queued-message capture showed an echoed `❯ queued lab fixture message` above a live `❯` composer with the dim `Press up to edit queued messages` hint.
+An immediate capture after Enter instead still showed `❯ queued lab fixture message` at the composer row, while native agent state remained `working`.
+
+```sh
+claude --version
+herdr --version
+HERDR_LAB_HELPER=bin/fm-herdr-lab.sh
+session=$("$HERDR_LAB_HELPER" name fm-afk-herdr-claude-inject)
+trap '"$HERDR_LAB_HELPER" teardown "$session"' EXIT
+"$HERDR_LAB_HELPER" provision "$session"
+workspace=$("$HERDR_LAB_HELPER" run "$session" workspace create --cwd "$PWD" --label claude-fixture --no-focus)
+pane=$(printf '%s' "$workspace" | jq -r '.result.root_pane.pane_id')
+sleep 3
+"$HERDR_LAB_HELPER" run "$session" agent start fixture-claude --kind claude --pane "$pane" --timeout 300000
+"$HERDR_LAB_HELPER" run "$session" agent prompt "$pane" 'Use the Bash tool to run sleep 60, then reply with exactly done. Begin now.'
+"$HERDR_LAB_HELPER" run "$session" pane send-keys "$pane" enter
+"$HERDR_LAB_HELPER" run "$session" pane send-text "$pane" 'queued lab fixture message'
+"$HERDR_LAB_HELPER" run "$session" pane send-keys "$pane" enter
+"$HERDR_LAB_HELPER" run "$session" agent get "$pane"
+"$HERDR_LAB_HELPER" run "$session" pane read "$pane" --source recent --lines 200 --format ansi
+```
+
+Observed bounded output:
+
+```text
+2.1.226 (Claude Code)
+herdr 0.7.5
+agent: claude
+agent_status: working
+❯ queued lab fixture message
+❯ Press up to edit queued messages
+```
+
+The env-gated refresh guard drives the public backend submit dispatcher in a guarded named lab, requires exact native Claude identity, proves the unique literal is typed once before the bounded Enter retries, then polls the unshimmed pane until that literal appears with Claude's queued-message hint:
+
+```sh
+FM_HERDR_CLAUDE_SUBMIT_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-herdr-claude-submit-live-e2e.test.sh
+```
+
+Its bounded evidence line records the installed Claude and Herdr versions, `agent=claude`, `agent_status=working`, `public_submit=empty`, `literal_sends=1`, `enter_retries=2`, and `queued_transcript=observed`.
+Guard failures report both captured harness versions with the failed behavioral assertion.
+
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:
 

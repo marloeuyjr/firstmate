@@ -3158,6 +3158,54 @@ test_composer_state_claude_unbordered_prompt_is_empty() {
   pass "fm_backend_herdr_composer_state: a real-claude unbordered '❯' prompt row (no border box in view) reads empty"
 }
 
+# Trimmed from a 200-line capture in a guarded fm-lab- session on 2026-08-08
+# with Claude Code 2.1.226. Claude's current empty row is `❯` followed by
+# U+00A0 NBSP rather than an ASCII space, between its two separator rows.
+test_composer_state_claude_nbsp_prompt_capture_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-nbsp-empty"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n❯\xc2\xa0\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "the captured Claude 2.1.226 bare prompt with only NBSP must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: the lab-captured Claude NBSP-only prompt reads empty"
+}
+
+# Trimmed from the guarded 2026-08-08 lab capture with Claude Code 2.1.226
+# after its queued-message indicator arrived. The echoed queued instruction is
+# above the live composer, whose dim hint is ghost text rather than user input.
+test_composer_state_claude_queued_message_hint_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-claude-queued-hint"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '\x1b[0m\x1b[38;2;80;80;80m\x1b[48;2;55;55;55m❯ \x1b[0m\x1b[38;2;255;255;255m\x1b[48;2;55;55;55mqueued lab fixture message\x1b[0m\x1b[48;2;55;55;55m                     \x1b[0m\n                                   \x1b[0m\x1b[38;2;153;153;153m◉ xhigh · /effort\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m❯\xc2\xa0\x1b[0m\x1b[2mPress up to edit queued messages\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "the lab-captured Claude queued-message hint must leave the live composer empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: the lab-captured Claude queued-message hint leaves the live composer empty"
+}
+
+test_composer_state_claude_nbsp_requires_live_native_identity() {
+  local case_id dir log resp fb out
+  for case_id in missing non-claude stale; do
+    dir="$TMP_ROOT/composer-claude-nbsp-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '❯\xc2\xa0\n$ \n' > "$resp/1.out"
+    case "$case_id" in
+      missing) printf '1\n' > "$resp/2.exit" ;;
+      non-claude) printf '{"result":{"agent":{"agent":"codex","agent_status":"idle"}}}\n' > "$resp/2.out" ;;
+      stale) printf '{"result":{"agent":{"agent":"claude"}}}\n' > "$resp/2.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr lab:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "a $case_id native identity must not authorize a stale Claude NBSP row above a shell prompt, got '$out'"
+  done
+  pass "fm_backend_composer_state: Claude NBSP emptiness requires live exact native identity"
+}
+
 test_composer_state_claude_unbordered_prompt_is_pending() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-claude-bare-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3486,22 +3534,60 @@ test_send_text_submit_confirms_blocked_after_enter() {
   pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
 }
 
-test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter() {
-  local dir log resp fb out enter_count read_count
-  dir="$TMP_ROOT/submit-preexisting-working-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+# Claude Code 2.1.226 on Herdr 0.7.5 queues a busy-pane send before its queue
+# indicator is visible. This immediate guarded-lab capture still shows the
+# queued text on the bare prompt, so the structural composer classifier must
+# conservatively read pending until the submit path's exhausted-retry native
+# busy fallback confirms acceptance without a second text send.
+test_send_text_submit_busy_claude_queue_survives_indicator_lag() {
+  local dir log resp fb out enter_count read_count text_count busy_count
+  dir="$TMP_ROOT/submit-busy-claude-queue"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text; 2: baseline working; 3: Enter; 4: immediate queued capture;
+  # 5: live Claude identity; 6: retry Enter; 7: still-lagging capture;
+  # 8: live Claude identity; 9: final native busy fallback.
   printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/6.out"
+  printf '\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n\x1b[0m\x1b[38;2;153;153;153m❯\xc2\xa0queued lab fixture message\x1b[0m\n\x1b[0m\x1b[38;2;136;136;136m─────────────────────────────────────────────────────\x1b[0m\n  \x1b[0m\x1b[38;2;97;175;239mFable 5\x1b[0m\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"working"}}}\n' > "$resp/5.out"
+  cp "$resp/4.out" "$resp/7.out"
+  cp "$resp/5.out" "$resp/8.out"
+  cp "$resp/5.out" "$resp/9.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit must not accept preexisting working as proof that this Enter landed, got '$out'"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "queued lab fixture message" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a busy Claude queue with a lagging indicator must confirm delivered, got '$out'"
+  text_count=$(grep -c $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''queued lab fixture message' "$log")
+  [ "$text_count" -eq 1 ] || fail "a busy queued send must type its message once, got $text_count literal sends"
   enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 2 ] || fail "preexisting-working swallowed Enter should retry Enter up to the configured count, sent $enter_count Enter(s)"
+  [ "$enter_count" -eq 2 ] || fail "a lagging queued indicator should consume only the configured Enter retry budget, sent $enter_count Enter(s)"
   read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
-  [ "$read_count" -eq 2 ] || fail "preexisting-working confirmation should fall back to composer reads, made $read_count read(s)"
-  pass "fm_backend_herdr_send_text_submit: preexisting working is not accepted as submit proof when the composer still holds the message"
+  [ "$read_count" -eq 2 ] || fail "the busy queued-send path should inspect each lagging composer read, made $read_count reads"
+  busy_count=$(grep -c $'\x1f''agent'$'\x1f''get'$'\x1f''w1:p2' "$log")
+  [ "$busy_count" -eq 4 ] || fail "the busy queued-send path should corroborate each Claude composer read plus its baseline and final fallback, made $busy_count agent reads"
+  pass "fm_backend_herdr_send_text_submit: a lab-captured busy Claude queue survives indicator lag without retyping the message"
+}
+
+test_send_text_submit_non_claude_busy_with_persistent_content_stays_pending() {
+  local label dir log resp fb out enter_count read_count
+  for label in codex unknown; do
+    dir="$TMP_ROOT/submit-busy-$label-persistent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+    printf '  \xe2\x80\xba persistent message\n' > "$resp/4.out"
+    cp "$resp/4.out" "$resp/6.out"
+    if [ "$label" = codex ]; then
+      printf '{"result":{"agent":{"agent":"codex","agent_status":"working"}}}\n' > "$resp/7.out"
+    else
+      printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+    fi
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "persistent message" 2 0.01 0.01' "$ROOT" )
+    [ "$out" = pending ] || fail "a $label busy pane with persistent composer text must remain pending, got '$out'"
+    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    [ "$enter_count" -eq 2 ] || fail "a $label busy pane should consume the configured Enter budget, sent $enter_count Enter(s)"
+    read_count=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+    [ "$read_count" -eq 2 ] || fail "a $label busy pane should preserve both conservative composer reads, made $read_count read(s)"
+  done
+  pass "fm_backend_herdr_send_text_submit: non-Claude and unknown busy panes remain pending"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -4325,6 +4411,9 @@ test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
+test_composer_state_claude_nbsp_prompt_capture_is_empty
+test_composer_state_claude_queued_message_hint_is_empty
+test_composer_state_claude_nbsp_requires_live_native_identity
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
@@ -4345,7 +4434,8 @@ test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter
-test_send_text_submit_preexisting_working_does_not_false_confirm_swallowed_enter
+test_send_text_submit_busy_claude_queue_survives_indicator_lag
+test_send_text_submit_non_claude_busy_with_persistent_content_stays_pending
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change

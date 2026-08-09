@@ -214,6 +214,7 @@ Text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation waits for `working` or `blocked` across a bounded polling window.
 On an already active or unreadable baseline, it falls back to conservative composer clearance.
+After that path exhausts its Enter-only retry budget with proven pending content, exact native Claude identity plus a working state confirms that the message was accepted into Claude's queue.
 A fully unreadable target stops retrying and reports unknown.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed transition can cause only a redundant Enter on an empty composer, never duplicate message text.
 
@@ -234,6 +235,9 @@ A working Pi, pending middle row, missing identity, incomplete separator pair, o
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
+Claude's NBSP prompt is empty only when native identity is exactly Claude and native state is `working`, `idle`, `done`, or `blocked`.
+Claude can render a queued instruction above an empty composer with a dim queue-edit hint, while its first immediate capture can still show the queued text at the prompt.
+The submit-only response to that display lag is defined under [Current transport behavior](#current-transport-behavior), while the pre-injection guard continues to require an affirmative empty composer.
 
 A bare shell prompt is never an empty agent composer.
 Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
@@ -310,7 +314,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Ghost and placeholder recognition depends on ANSI de-emphasis and fails safely to pending when unavailable.
 - Mid-session secondmate liveness is not implemented.
 - OpenCode 1.18.4 can accept Enter while busy without clearing the composer.
-  The tmux backend has a busy-queue fallback, but Herdr still reports this case as submit pending and needs a separate adapter fix.
+  Tmux has a busy-queue fallback, but Herdr still reports this OpenCode case as submit pending; Herdr's narrower Claude exception is defined under [Current transport behavior](#current-transport-behavior).
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points
@@ -328,6 +332,7 @@ tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-herdr-claude-submit-live-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

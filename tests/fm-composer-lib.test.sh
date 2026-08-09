@@ -87,6 +87,15 @@ test_agent_glyphs_are_empty_bordered_and_bare() {
   pass "fm_composer_classify_content: agent prompt glyphs (❯ claude, › codex, ⟩ muse) read empty bordered or bare"
 }
 
+test_nbsp_remains_conservative_in_shared_classifier() {
+  local nbsp=$'\302\240' out
+  out=$(classify 0 "\$${nbsp}")
+  [ "$out" = pending ] || fail "a bare shell prompt with NBSP must remain pending in the shared classifier, got '$out'"
+  out=$(classify 0 "❯${nbsp}")
+  [ "$out" = pending ] || fail "an agent prompt with NBSP must remain pending outside an adapter-specific structural path, got '$out'"
+  pass "fm_composer_classify_content: NBSP is not fleet-wide empty whitespace"
+}
+
 # --- Empty content and idle placeholder -------------------------------------
 
 test_empty_content_is_empty() {
@@ -138,6 +147,7 @@ test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
+test_nbsp_remains_conservative_in_shared_classifier
 test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
