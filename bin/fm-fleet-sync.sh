@@ -291,7 +291,7 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
-outer_dirt_is_only_submodule_paths() {
+outer_dirt_submodule_paths() {
   local entry path saw_dirt=no
 
   while IFS= read -r -d '' entry; do
@@ -299,9 +299,15 @@ outer_dirt_is_only_submodule_paths() {
     [ "${#entry}" -gt 3 ] || return 1
     path=${entry:3}
     git -C "$PROJ" ls-files --stage -- "$path" | grep -q '^160000 ' || return 1
+    printf '%s\n' "$path"
   done < <(git -C "$PROJ" status --porcelain=v1 -z --ignore-submodules=none)
 
   [ "$saw_dirt" = yes ]
+}
+
+same_submodule_path_set() {
+  local left=$1 right=$2
+  [ "$(printf '%s\n' "$left" | LC_ALL=C sort)" = "$(printf '%s\n' "$right" | LC_ALL=C sort)" ]
 }
 
 sync_project() {
@@ -354,7 +360,10 @@ sync_project() {
   recovered_reattach=no
   recovered_submodules=
 
-  if [ "$cur" = "$DEFAULT" ] && [ "$dirty" = yes ] && outer_dirt_is_only_submodule_paths; then
+  if [ "$cur" = "$DEFAULT" ] && [ "$dirty" = yes ] \
+    && dirty_submodules=$(outer_dirt_submodule_paths) \
+    && planned_submodules=$(fm_restore_anchored_submodule_pointer_drift --dry-run "$PROJ") \
+    && same_submodule_path_set "$dirty_submodules" "$planned_submodules"; then
     if ! recovered_submodules=$(fm_restore_anchored_submodule_pointer_drift "$PROJ"); then
       report_stuck "$(stuck_state)"
       return 0

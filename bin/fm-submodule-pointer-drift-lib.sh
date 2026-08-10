@@ -3,8 +3,8 @@
 # clean and its current HEAD is anchored by an origin ref or a qualifying local
 # branch ref that survives the outer worktree's removal.
 #
-# fm_restore_anchored_submodule_pointer_drift <worktree> emits each restored
-# submodule path on stdout.
+# fm_restore_anchored_submodule_pointer_drift [--dry-run] <worktree> emits each
+# eligible submodule path on stdout and restores it unless --dry-run is given.
 # It leaves staged gitlink changes, dirty or untracked inner trees, unanchored
 # inner HEADs, and every non-gitlink outer change untouched.
 # A failed checkout prints a refusal and returns non-zero.
@@ -19,8 +19,15 @@ fm_submodule_drift_canonical_existing_dir() {
 }
 
 fm_restore_anchored_submodule_pointer_drift() {
-  local worktree=$1 config_entry path worktree_abs submodule submodule_head
+  local dry_run=no worktree config_entry path worktree_abs submodule submodule_head
   local submodule_git_dir inner_status diff_rc local_anchor_survives
+
+  if [ "${1:-}" = --dry-run ]; then
+    dry_run=yes
+    shift
+  fi
+  [ "$#" -eq 1 ] || return 2
+  worktree=$1
 
   [ -f "$worktree/.gitmodules" ] || return 0
   worktree_abs=$(fm_submodule_drift_canonical_existing_dir "$worktree") || return 0
@@ -67,9 +74,11 @@ fm_restore_anchored_submodule_pointer_drift() {
     else
       continue
     fi
-    if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$path" >/dev/null </dev/null; then
-      echo "REFUSED: cannot restore landed submodule pointer $path in $worktree." >&2
-      return 1
+    if [ "$dry_run" = no ]; then
+      if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$path" >/dev/null </dev/null; then
+        echo "REFUSED: cannot restore landed submodule pointer $path in $worktree." >&2
+        return 1
+      fi
     fi
     printf '%s\n' "$path"
   done < <(git -C "$worktree" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$')

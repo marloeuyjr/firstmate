@@ -83,13 +83,14 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
-# build_submodule_pair <home> <name>: create an outer clone that records the
-# second commit from an origin-backed core/openelis submodule.
+# build_submodule_pair <home> <name> [with-second]: create an outer clone that
+# records the second commit from an origin-backed core/openelis submodule.
 # The paired outer work repo remains at home/work-<name>, so advance_origin can
 # advance its origin after the clone has been created.
+# The optional second submodule exercises mixed-pointer safety cases.
 # The returned clone initializes the submodule through Git's executable interface.
 build_submodule_pair() {
-  local home=$1 name=$2 inner_work inner_remote work remote clone remote_abs inner_remote_abs
+  local home=$1 name=$2 with_second=${3:-no} inner_work inner_remote work remote clone remote_abs inner_remote_abs
   inner_work="$home/submodule-work-$name"
   inner_remote="$home/remotes/$name-openelis.git"
   work="$home/work-$name"
@@ -112,7 +113,11 @@ build_submodule_pair() {
   commit_file "$work" file.txt v0 C0
   git -C "$work" -c protocol.file.allow=always submodule add -q \
     "file://$inner_remote_abs" core/openelis
-  git -C "$work" add .gitmodules core/openelis
+  if [ "$with_second" = with-second ]; then
+    git -C "$work" -c protocol.file.allow=always submodule add -q \
+      "file://$inner_remote_abs" core/second
+  fi
+  git -C "$work" add .gitmodules core
   git -C "$work" commit -qm "add submodule"
   git clone --quiet --bare "$work" "$remote"
   git -C "$remote" symbolic-ref HEAD refs/heads/main
@@ -492,6 +497,27 @@ test_other_outer_dirt_with_submodule_pointer_is_stuck_untouched() {
   pass "other outer dirt is reported STUCK and leaves the submodule pointer untouched"
 }
 
+test_mixed_submodule_drift_is_stuck_without_partial_recovery() {
+  local home clone safe staged out safe_before staged_before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-mixed with-second)
+  safe="$clone/core/openelis"
+  staged="$clone/core/second"
+  drift_submodule_to_origin_ancestor "$clone"
+  git -C "$staged" checkout --detach --quiet origin/main^
+  git -C "$clone" add core/second
+  safe_before=$(head_sha "$safe")
+  staged_before=$(head_sha "$staged")
+  advance_origin "$home" submodule-mixed C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-mixed: STUCK:" "mixed submodule dirt remains stuck"
+  [ "$(head_sha "$safe")" = "$safe_before" ] || fail "safe pointer was reset beside staged drift"
+  [ "$(head_sha "$staged")" = "$staged_before" ] || fail "staged pointer was reset"
+  pass "mixed submodule drift is reported STUCK without partial recovery"
+}
+
 test_already_current_unchanged() {
   local home clone out before
   home=$(new_home)
@@ -783,6 +809,7 @@ test_dirty_submodule_inner_tree_is_stuck_untouched
 test_untracked_submodule_inner_tree_is_stuck_untouched
 test_unanchored_submodule_head_is_stuck_untouched
 test_other_outer_dirt_with_submodule_pointer_is_stuck_untouched
+test_mixed_submodule_drift_is_stuck_without_partial_recovery
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
