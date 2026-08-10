@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Non-executing migration for watcher PR checks created by older Firstmate
 # versions. Legacy check files are never run, sourced, or parsed by Bash.
+# With --checks-safe, a valid scan marker skips task and quarantine walks after
+# four metadata reads (state device plus scan-marker mode, device, and link count).
+# An existing X shim and legacy reserved namespace markers remain separately
+# checked before that fast path.
 # Pending validated merged-poll retirements finish first. Canonical polls are
 # then rebuilt from validated metadata, remaining provenance-bound polls and
 # registered custom checks remain armed, and every other task poll is
@@ -216,12 +220,18 @@ legacy_noncanonical_namespace_absent() {
   done
 }
 
-scan_complete() {
+scan_marker_fast_valid() {
   local state_device
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   state_device=$(fm_pr_file_device "$STATE") || return 1
   fm_pr_private_file_valid "$SCAN_MARKER" 600 "$state_device" || return 1
-  scan_marker_content_valid "$SCAN_MARKER" || return 1
+  scan_marker_content_valid "$SCAN_MARKER"
+}
+
+scan_complete() {
+  local state_device
+  scan_marker_fast_valid || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
   private_migration_boundaries_valid "$state_device" || return 1
   diagnostic_namespace_valid || return 1
   legacy_noncanonical_namespace_absent || return 1
@@ -257,8 +267,13 @@ x_shim_locked_scan_needed() {
 # Marker short-circuits apply only when generated artifact identities are current.
 # Otherwise watcher exclusion comes before every check scan and state mutation.
 if ! x_shim_locked_scan_needed; then
+  # The watcher re-authenticates every individual check immediately before it
+  # runs it, so a completed non-executing scan need not walk settled artifacts
+  # again on every arm. A malformed or absent marker falls through to the full
+  # migration, and unflagged invocations still repair incomplete outcomes.
+  [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_marker_fast_valid \
+    && legacy_noncanonical_namespace_absent && exit 0
   migration_complete && exit 0
-  [ "$ALLOW_INCOMPLETE_REPAIRS" -eq 1 ] && scan_complete && exit 0
 fi
 
 # shellcheck source=bin/fm-wake-lib.sh disable=SC1091

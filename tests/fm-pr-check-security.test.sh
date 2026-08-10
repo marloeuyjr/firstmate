@@ -24,6 +24,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
+REAL_UNAME=$(command -v uname)
 REAL_CHMOD=$(command -v chmod)
 REAL_BASENAME=$(command -v basename)
 
@@ -1992,6 +1993,79 @@ SH
   pass "legacy reserved obligations and delimiter-bearing task IDs retry without ambiguity"
 }
 
+test_scan_marker_bounds_arming_and_keeps_untrusted_polls_inert() {
+  local dir state before after rc count uname_count i sentinel
+  dir=$(make_case scan-marker-fast-path)
+  state="$dir/home/state"
+  for i in 1 2 3 4 5 6 7 8; do
+    write_poll_meta "$state" "task-$i" "https://github.com/o/r/pull/$i"
+    fm_pr_poll_prepare "$state" "task-$i" github "https://github.com/o/r/pull/$i" github.com o/r "$i" "$POLL" \
+      || fail "could not prepare scan-marker fixture poll $i"
+    fm_pr_poll_publish_prepared || fail "could not publish scan-marker fixture poll $i"
+  done
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "could not establish the scan-marker fixture"
+  assert_valid_scan_marker "$state/.pr-check-migration-scan-v1"
+  before=$(state_snapshot "$state")
+  cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+printf 'stat\n' >> "$FM_TEST_STAT_LOG"
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  cat > "$dir/fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf 'uname\n' >> "$FM_TEST_UNAME_LOG"
+exec "$FM_TEST_REAL_UNAME" "$@"
+SH
+  chmod +x "$dir/fakebin/stat" "$dir/fakebin/uname"
+  : > "$dir/stat.log"
+  : > "$dir/uname.log"
+  set +e
+  FM_HOME="$dir/home" PATH="$dir/fakebin:$BASE_PATH" \
+    FM_TEST_STAT_LOG="$dir/stat.log" FM_TEST_REAL_STAT="$REAL_STAT" \
+    FM_TEST_UNAME_LOG="$dir/uname.log" FM_TEST_REAL_UNAME="$REAL_UNAME" \
+    "$MIGRATE" --checks-safe > "$dir/migrate.out" 2> "$dir/migrate.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "scan-marker arm path failed: $(cat "$dir/migrate.err")"
+  count=$(awk 'END { print NR + 0 }' "$dir/stat.log")
+  uname_count=$(awk 'END { print NR + 0 }' "$dir/uname.log")
+  [ "$count" -gt 0 ] && [ "$count" -le 4 ] \
+    || fail "scan-marker arm path exceeded its four-stat bound ($count)"
+  [ "$uname_count" -gt 0 ] && [ "$uname_count" -le 1 ] \
+    || fail "scan-marker arm path redetected its platform ($uname_count times)"
+  after=$(state_snapshot "$state")
+  [ "$after" = "$before" ] || fail "scan-marker arm path changed settled poll artifacts"
+
+  dir=$(make_case scan-marker-untrusted-poll)
+  state="$dir/home/state"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" >/dev/null 2>/dev/null \
+    || fail "could not establish the untrusted-poll scan marker"
+  sentinel="$dir/untrusted-ran"
+  cat > "$state/task-a.check.sh" <<SH
+#!/usr/bin/env bash
+printf 'ran\n' > "$sentinel"
+SH
+  chmod 0700 "$state/task-a.check.sh"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed while rejecting an unmigrated poll"
+  [ ! -e "$sentinel" ] || fail "watcher executed an unmigrated poll after a completed scan"
+  [ -f "$state/task-a.check.sh" ] || fail "scan-marker arm path unexpectedly migrated the untrusted poll"
+  grep -F 'rejected unauthenticated state checks:' "$dir/watch.out" >/dev/null \
+    || fail "watcher did not report the unmigrated poll as unavailable"
+
+  rm -f "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
+  FM_HOME="$dir/home" PATH="$BASE_PATH" "$MIGRATE" --checks-safe >/dev/null 2>/dev/null \
+    || fail "unmarked home did not migrate the untrusted poll"
+  [ ! -e "$sentinel" ] || fail "migration executed the quarantined poll"
+  find "$state/.pr-check-quarantine" -name 'task-a.check.*' -type f | grep . >/dev/null \
+    || fail "unmarked home did not quarantine the untrusted poll"
+  pass "scan-marker arms use a bounded check while unmigrated and quarantined polls stay inert"
+}
+
 test_nonexecuting_migration() {
   local dir state marker x_before x_after snap_before snap_after rc
   dir=$(make_case migration)
@@ -2007,7 +2081,7 @@ test_nonexecuting_migration() {
   chmod 0700 "$state/x-watch.check.sh"
   x_before=$(state_snapshot "$state" | grep 'x-watch.check.sh')
 
-  FM_HOME="$dir/home" "$MIGRATE" > "$dir/migrate.out" 2> "$dir/migrate.err" \
+  FM_HOME="$dir/home" "$MIGRATE" --checks-safe > "$dir/migrate.out" 2> "$dir/migrate.err" \
     || fail "canonical legacy migration failed"
   [ "$(cat "$dir/migrate.out")" = 'PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home' ] \
     || fail "canonical migration stdout did not state that the rebuilt poll is armed"
@@ -2425,10 +2499,10 @@ SH
   assert_no_grep 'custom-replacement-ran' "$dir/watch-custom-replaced.out" \
     "watcher executed a custom check after its registered bytes changed"
   [ -e "$x_poll_marker" ] || fail "custom replacement rejection suppressed the trusted X poll"
-  [ ! -e "$state/b-custom.check.sh" ] && [ ! -L "$state/b-custom.check.sh" ] \
-    || fail "marker-aware scan left the replaced custom check runnable"
-  find "$state/.pr-check-quarantine" -name 'b-custom.check.*' -type f | grep . >/dev/null \
-    || fail "marker-aware scan did not quarantine the replaced custom check"
+  [ -f "$state/b-custom.check.sh" ] && [ ! -L "$state/b-custom.check.sh" ] \
+    || fail "scan-marker fast path removed the unavailable custom check"
+  ! find "$state/.pr-check-quarantine" -name 'b-custom.check.*' -type f | grep . >/dev/null \
+    || fail "scan-marker fast path rewalked and quarantined the replaced custom check"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' forged-x-ran" > "$state/x-watch.check.sh"
   chmod 0700 "$state/x-watch.check.sh"
   rm -f "$state/.last-check" "$x_poll_marker"
@@ -3347,6 +3421,7 @@ test_replacement_provenance_negative_matrix
 test_complete_single_link_validation
 test_canonical_publication_failure_recovers_only_on_retry
 test_obligation_namespace_compatibility
+test_scan_marker_bounds_arming_and_keeps_untrusted_polls_inert
 test_nonexecuting_migration
 test_historical_x_shim_transition_matrix
 test_direct_registration_refreshes_v1_x_shim
