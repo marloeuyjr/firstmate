@@ -213,37 +213,19 @@ fm_pr_head_valid() {
   [[ "$head" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
 }
 
-fm_pr_file_mode() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1" 2>/dev/null
-  else
-    stat -c %a "$1" 2>/dev/null
-  fi
-}
-
-fm_pr_file_device() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %d "$1" 2>/dev/null
-  else
-    stat -c %d "$1" 2>/dev/null
-  fi
-}
-
-fm_pr_file_link_count() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %l "$1" 2>/dev/null
-  else
-    stat -c %h "$1" 2>/dev/null
-  fi
-}
-
-fm_pr_file_inode() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f %i "$1" 2>/dev/null
-  else
-    stat -c %i "$1" 2>/dev/null
-  fi
-}
+# Select the portable stat form once when this shared library loads.
+# Artifact validation calls these helpers repeatedly during migration.
+if [ "$(uname)" = Darwin ]; then
+  fm_pr_file_mode() { stat -f %Lp "$1" 2>/dev/null; }
+  fm_pr_file_device() { stat -f %d "$1" 2>/dev/null; }
+  fm_pr_file_link_count() { stat -f %l "$1" 2>/dev/null; }
+  fm_pr_file_inode() { stat -f %i "$1" 2>/dev/null; }
+else
+  fm_pr_file_mode() { stat -c %a "$1" 2>/dev/null; }
+  fm_pr_file_device() { stat -c %d "$1" 2>/dev/null; }
+  fm_pr_file_link_count() { stat -c %h "$1" 2>/dev/null; }
+  fm_pr_file_inode() { stat -c %i "$1" 2>/dev/null; }
+fi
 
 fm_pr_file_identity() {
   local device inode

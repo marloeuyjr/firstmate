@@ -705,6 +705,16 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
+# Startup itself is liveness: publish the beacon before the non-executing
+# migration, which can be slow under load, so supervision never mistakes that
+# safety work for a dead watcher. A candidate must not freshen a live holder's
+# stale beacon while it is still only trying to join that existing cycle.
+startup_lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+case "$startup_lock_pid" in
+  ''|*[!0-9]*) touch "$STATE/.last-watcher-beat" ;;
+  *) kill -0 "$startup_lock_pid" 2>/dev/null || touch "$STATE/.last-watcher-beat" ;;
+esac
+
 # Before acquiring the watcher lock or enumerating any runnable check, replace
 # or quarantine checks created by older versions. The migration compares bytes
 # and reads data only; it never invokes legacy check files through Bash.

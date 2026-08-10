@@ -57,6 +57,38 @@ test_singleton_start() {
   pass "simultaneous watcher starts leave exactly one live process"
 }
 
+test_startup_beacon_precedes_migration() {
+  local dir state fakebin gate real_stat pid i
+  dir=$(make_case startup-beacon-before-migration)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  gate="$dir/migration-stat-started"
+  real_stat=$(command -v stat)
+  cat > "$fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+printf 'migration stat started\n' > "$FM_TEST_MIGRATION_STAT_GATE"
+sleep 2
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+  chmod +x "$fakebin/stat"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_TEST_MIGRATION_STAT_GATE="$gate" \
+    FM_TEST_REAL_STAT="$real_stat" FM_POLL=30 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 \
+    FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$gate" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$gate" ] || fail "slow migration did not reach its first metadata read"
+  [ -e "$state/.last-watcher-beat" ] \
+    || fail "watcher did not publish its liveness beacon before migration"
+  is_live_non_zombie "$pid" || fail "watcher exited before the slow migration completed"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watcher publishes liveness before a slow migration starts"
+}
+
 test_stale_watch_lock_reclaimed() {
   local dir state fakebin out dead_pid pid live lock_pid i
   dir=$(make_case stale-lock)
@@ -1033,6 +1065,7 @@ test_msys_pid_identity_uses_proc() {
 }
 
 test_singleton_start
+test_startup_beacon_precedes_migration
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
