@@ -1110,7 +1110,7 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  fm_restore_anchored_submodule_pointer_drift "$WT" || return 1
+  fm_restore_anchored_submodule_pointer_drift "$WT" >/dev/null || return 1
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
