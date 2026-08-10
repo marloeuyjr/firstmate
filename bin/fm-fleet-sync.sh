@@ -3,13 +3,13 @@
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
-# Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
-# branch is free to check out is re-attached and then fast-forwarded ("recovered:").
-# Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
+# Self-heals two unambiguously safe drifts: a clean, detached HEAD that holds no
+# unique commits (it is an ancestor of origin/<default>) and whose <default> branch
+# is free to check out is re-attached, and an otherwise-clean default branch with
+# only anchored, unstaged submodule gitlink drift is restored to its recorded pin.
+# Every other off-default state or dirty tree may hold real work, so it is left
+# untouched and reported as a quantified, loud "STUCK: ... N commits behind ... -
+# needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
@@ -35,6 +35,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-submodule-pointer-drift-lib.sh
+. "$SCRIPT_DIR/fm-submodule-pointer-drift-lib.sh"
 FM_LOCK_LOG_PREFIX=fleet-sync
 "$FM_ROOT/bin/fm-guard.sh" || true
 
@@ -289,6 +291,19 @@ report_stuck() {
   echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
 }
 
+outer_dirt_is_only_submodule_paths() {
+  local entry path saw_dirt=no
+
+  while IFS= read -r -d '' entry; do
+    saw_dirt=yes
+    [ "${#entry}" -gt 3 ] || return 1
+    path=${entry:3}
+    git -C "$PROJ" ls-files --stage -- "$path" | grep -q '^160000 ' || return 1
+  done < <(git -C "$PROJ" status --porcelain=v1 -z --ignore-submodules=none)
+
+  [ "$saw_dirt" = yes ]
+}
+
 sync_project() {
   PROJ=$1
   label=$(project_label)
@@ -335,8 +350,21 @@ sync_project() {
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
-  recovered=no
+  [ -z "$(git -C "$PROJ" status --porcelain --ignore-submodules=none 2>/dev/null | head -1)" ] || dirty=yes
+  recovered_reattach=no
+  recovered_submodules=
+
+  if [ "$cur" = "$DEFAULT" ] && [ "$dirty" = yes ] && outer_dirt_is_only_submodule_paths; then
+    if ! recovered_submodules=$(fm_restore_anchored_submodule_pointer_drift "$PROJ"); then
+      report_stuck "$(stuck_state)"
+      return 0
+    fi
+    if [ -n "$recovered_submodules" ]; then
+      recovered_submodules=$(printf '%s\n' "$recovered_submodules" | paste -sd ',' -)
+      dirty=no
+      [ -z "$(git -C "$PROJ" status --porcelain --ignore-submodules=none 2>/dev/null | head -1)" ] || dirty=yes
+    fi
+  fi
 
   if [ "$cur" != "$DEFAULT" ]; then
     # Off the default branch. Auto-recover only the one unambiguously safe drift:
@@ -355,7 +383,7 @@ sync_project() {
         report_stuck "$(stuck_state)"
         return 0
       fi
-      recovered=yes
+      recovered_reattach=yes
       cur=$DEFAULT
     else
       report_stuck "$(stuck_state)"
@@ -381,7 +409,9 @@ sync_project() {
     return 0
   }
   if [ "$local_rev" = "$remote_rev" ]; then
-    if [ "$recovered" = yes ]; then
+    if [ -n "$recovered_submodules" ]; then
+      echo "$label: recovered: restored submodule pointer $recovered_submodules (already current)"
+    elif [ "$recovered_reattach" = yes ]; then
       echo "$label: recovered: re-attached $DEFAULT (already current)"
     else
       echo "$label: already current"
@@ -409,7 +439,9 @@ sync_project() {
     echo "$label: skipped: fast-forward completed but cannot read local $DEFAULT"
     return 0
   }
-  if [ "$recovered" = yes ]; then
+  if [ -n "$recovered_submodules" ]; then
+    echo "$label: recovered: restored submodule pointer $recovered_submodules, synced $before..$after"
+  elif [ "$recovered_reattach" = yes ]; then
     echo "$label: recovered: re-attached $DEFAULT, synced $before..$after"
   else
     echo "$label: synced $before..$after"

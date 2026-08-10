@@ -83,6 +83,56 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+# build_submodule_pair <home> <name>: create an outer clone that records the
+# second commit from an origin-backed core/openelis submodule.
+# The paired outer work repo remains at home/work-<name>, so advance_origin can
+# advance its origin after the clone has been created.
+# The returned clone initializes the submodule through Git's executable interface.
+build_submodule_pair() {
+  local home=$1 name=$2 inner_work inner_remote work remote clone remote_abs inner_remote_abs
+  inner_work="$home/submodule-work-$name"
+  inner_remote="$home/remotes/$name-openelis.git"
+  work="$home/work-$name"
+  remote="$home/remotes/$name.git"
+  clone="$home/projects/$name"
+  mkdir -p "$home/remotes"
+
+  git init -q "$inner_work"
+  git -C "$inner_work" symbolic-ref HEAD refs/heads/main
+  commit_file "$inner_work" README.md S0 S0
+  commit_file "$inner_work" README.md S1 S1
+  git clone --quiet --bare "$inner_work" "$inner_remote"
+  git -C "$inner_remote" symbolic-ref HEAD refs/heads/main
+  inner_remote_abs=$(cd "$inner_remote" && pwd)
+  git -C "$inner_work" remote add origin "file://$inner_remote_abs"
+  git -C "$inner_work" push -q -u origin main
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD refs/heads/main
+  commit_file "$work" file.txt v0 C0
+  git -C "$work" -c protocol.file.allow=always submodule add -q \
+    "file://$inner_remote_abs" core/openelis
+  git -C "$work" add .gitmodules core/openelis
+  git -C "$work" commit -qm "add submodule"
+  git clone --quiet --bare "$work" "$remote"
+  git -C "$remote" symbolic-ref HEAD refs/heads/main
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin main
+
+  git -c protocol.file.allow=always clone --quiet --recurse-submodules \
+    "file://$remote_abs" "$clone"
+  printf '%s\n' "$clone"
+}
+
+# Move the initialized submodule from its recorded S1 pin to origin/main^ (S0).
+# This produces only an unstaged, origin-anchored gitlink drift in the outer clone.
+drift_submodule_to_origin_ancestor() {
+  local clone=$1 inner
+  inner="$clone/core/openelis"
+  git -C "$inner" checkout --detach --quiet origin/main^
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -323,6 +373,123 @@ test_on_default_clean_behind_fast_forwards() {
   assert_not_contains "$out" "STUCK" "ordinary fast-forward is not flagged STUCK"
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] || fail "clone was not fast-forwarded"
   pass "on-default clean behind clone still fast-forwards"
+}
+
+test_anchored_submodule_pointer_drift_recovers_and_syncs() {
+  local home clone inner out expected
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-recover)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  advance_origin "$home" submodule-recover C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-recover: recovered: restored submodule pointer core/openelis, synced" \
+    "anchored submodule pointer drift is visibly recovered"
+  assert_not_contains "$out" "STUCK" "anchored submodule pointer drift is not stuck"
+  [ -z "$(git -C "$clone" status --porcelain --ignore-submodules=none)" ] \
+    || fail "recovered submodule clone remained dirty"
+  expected=$(git -C "$clone" ls-tree HEAD core/openelis | awk '{print $3}')
+  [ "$(head_sha "$inner")" = "$expected" ] || fail "submodule did not return to its recorded pin"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "recovered clone did not sync to origin/main"
+  pass "anchored unstaged submodule pointer drift is restored and synced"
+}
+
+test_staged_submodule_pointer_is_stuck_untouched() {
+  local home clone inner out staged_before staged_after
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-staged)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  git -C "$clone" add core/openelis
+  staged_before=$(git -C "$clone" diff --cached -- core/openelis)
+  advance_origin "$home" submodule-staged C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-staged: STUCK:" "staged submodule pointer remains stuck"
+  assert_contains "$out" "uncommitted changes" "staged pointer names the dirty state"
+  staged_after=$(git -C "$clone" diff --cached -- core/openelis)
+  [ "$staged_before" = "$staged_after" ] || fail "staged submodule pointer was altered"
+  [ "$(head_sha "$inner")" = "$(git -C "$inner" rev-parse origin/main^)" ] \
+    || fail "staged submodule inner HEAD was altered"
+  pass "staged submodule pointer is reported STUCK and left untouched"
+}
+
+test_dirty_submodule_inner_tree_is_stuck_untouched() {
+  local home clone inner out before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-dirty)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  before=$(head_sha "$inner")
+  printf 'uncommitted edit\n' >> "$inner/README.md"
+  advance_origin "$home" submodule-dirty C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-dirty: STUCK:" "dirty submodule inner tree remains stuck"
+  assert_contains "$out" "uncommitted changes" "dirty inner tree names the dirty state"
+  [ "$(head_sha "$inner")" = "$before" ] || fail "dirty inner tree was reset"
+  grep -q 'uncommitted edit' "$inner/README.md" || fail "dirty inner edit was discarded"
+  pass "dirty submodule inner tree is reported STUCK and left untouched"
+}
+
+test_untracked_submodule_inner_tree_is_stuck_untouched() {
+  local home clone inner out before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-untracked)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  before=$(head_sha "$inner")
+  printf 'untracked\n' > "$inner/untracked.txt"
+  advance_origin "$home" submodule-untracked C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-untracked: STUCK:" "untracked submodule inner tree remains stuck"
+  assert_contains "$out" "uncommitted changes" "untracked inner tree names the dirty state"
+  [ "$(head_sha "$inner")" = "$before" ] || fail "untracked inner tree was reset"
+  assert_present "$inner/untracked.txt" "untracked inner file was discarded"
+  pass "untracked submodule inner tree is reported STUCK and left untouched"
+}
+
+test_unanchored_submodule_head_is_stuck_untouched() {
+  local home clone inner out before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-unanchored)
+  inner="$clone/core/openelis"
+  commit_file "$inner" local.txt local "local-only inner commit"
+  before=$(head_sha "$inner")
+  advance_origin "$home" submodule-unanchored C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-unanchored: STUCK:" "unanchored submodule HEAD remains stuck"
+  assert_contains "$out" "uncommitted changes" "unanchored HEAD names the dirty state"
+  [ "$(head_sha "$inner")" = "$before" ] || fail "unanchored inner HEAD was reset"
+  pass "unanchored submodule HEAD is reported STUCK and left untouched"
+}
+
+test_other_outer_dirt_with_submodule_pointer_is_stuck_untouched() {
+  local home clone inner out before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-outer-dirty)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  before=$(head_sha "$inner")
+  printf 'uncommitted outer edit\n' >> "$clone/file.txt"
+  advance_origin "$home" submodule-outer-dirty C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-outer-dirty: STUCK:" "other outer dirt remains stuck"
+  assert_contains "$out" "uncommitted changes" "other outer dirt names the dirty state"
+  [ "$(head_sha "$inner")" = "$before" ] || fail "outer dirt allowed submodule reset"
+  grep -q 'uncommitted outer edit' "$clone/file.txt" || fail "outer edit was discarded"
+  pass "other outer dirt is reported STUCK and leaves the submodule pointer untouched"
 }
 
 test_already_current_unchanged() {
@@ -610,6 +777,12 @@ test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
+test_anchored_submodule_pointer_drift_recovers_and_syncs
+test_staged_submodule_pointer_is_stuck_untouched
+test_dirty_submodule_inner_tree_is_stuck_untouched
+test_untracked_submodule_inner_tree_is_stuck_untouched
+test_unanchored_submodule_head_is_stuck_untouched
+test_other_outer_dirt_with_submodule_pointer_is_stuck_untouched
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped

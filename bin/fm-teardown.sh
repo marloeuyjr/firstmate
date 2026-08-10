@@ -169,6 +169,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-submodule-pointer-drift-lib.sh
+. "$SCRIPT_DIR/fm-submodule-pointer-drift-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1100,65 +1102,6 @@ teardown_treehouse_return() {
   return 1
 }
 
-restore_landed_submodule_pointer_drift() {
-  local config_entry path wt_abs submodule submodule_head submodule_git_dir inner_status diff_rc pipeline_rc local_anchor_survives
-  [ -f "$WT/.gitmodules" ] || return 0
-  wt_abs=$(canonical_existing_dir "$WT") || return 0
-  git -C "$WT" config --file .gitmodules --get-regexp '^submodule\..*\.path$' >/dev/null 2>&1 \
-    || return 0
-
-  git -C "$WT" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$' |
-    while IFS= read -r -d '' config_entry; do
-      path=${config_entry#*$'\n'}
-      [ -n "$path" ] || continue
-      submodule=$(canonical_existing_dir "$WT/$path") || continue
-      case "$submodule" in
-        "$wt_abs"/*) ;;
-        *) continue ;;
-      esac
-      git -C "$submodule" rev-parse --git-dir >/dev/null 2>&1 || continue
-      git -C "$WT" ls-files --stage -- "$path" | grep -q '^160000 ' || continue
-      if git -C "$WT" diff --cached --quiet -- "$path"; then
-        :
-      else
-        continue
-      fi
-      if git -C "$WT" diff --quiet --ignore-submodules=dirty -- "$path"; then
-        continue
-      else
-        diff_rc=$?
-      fi
-      [ "$diff_rc" -eq 1 ] || continue
-      if ! inner_status=$(git -C "$submodule" status --porcelain --untracked-files=all); then
-        continue
-      fi
-      [ -z "$inner_status" ] || continue
-      submodule_head=$(git -C "$submodule" rev-parse --verify HEAD 2>/dev/null) || continue
-      submodule_git_dir=$(git -C "$submodule" rev-parse --absolute-git-dir 2>/dev/null) || continue
-      submodule_git_dir=$(canonical_existing_dir "$submodule_git_dir") || continue
-      local_anchor_survives=1
-      case "$submodule_git_dir" in
-        "$wt_abs"|"$wt_abs"/*) local_anchor_survives=0 ;;
-      esac
-      if git -C "$submodule" for-each-ref --contains="$submodule_head" --format='%(refname)' \
-          refs/remotes/origin | grep -q .; then
-        :
-      elif [ "$local_anchor_survives" -eq 1 ] && \
-          git -C "$submodule" for-each-ref --contains="$submodule_head" --format='%(refname)' \
-            refs/heads | grep -q .; then
-        :
-      else
-        continue
-      fi
-      if ! git -C "$WT" submodule update --no-fetch --checkout -- "$path" </dev/null; then
-        echo "REFUSED: cannot restore landed submodule pointer $path in $WT." >&2
-        exit 1
-      fi
-    done
-  pipeline_rc=${PIPESTATUS[1]}
-  return "$pipeline_rc"
-}
-
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1167,7 +1110,7 @@ validate_worktree_teardown_safety() {
     secondmate|scout) return 0 ;;
   esac
 
-  restore_landed_submodule_pointer_drift || return 1
+  fm_restore_anchored_submodule_pointer_drift "$WT" || return 1
 
   if ! dirty_raw=$(git -C "$WT" status --porcelain --ignore-submodules=none 2>/dev/null); then
     if worktree_safety_blocked_by_lock "uncommitted changes"; then
