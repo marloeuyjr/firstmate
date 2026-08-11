@@ -17,7 +17,9 @@
 #   (i) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
 #   (j) malformed PR URL fails fast without calling gh-axi
 #   (k) explicit merge method is not overridden by the default --squash
-#   (l) repo override args fail fast because the repo comes from the URL
+#   (l) repository or hostname override args fail fast because identity comes from the URL
+#   (m) retained task identity is checked before every configured completion path
+#   (n) GitHub Enterprise URLs bind gh-axi to the canonical hostname
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,7 +35,8 @@ make_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$fakebin"
+  tasks-axi add task-x1 "Live task" --kind ship --file "$case_dir/data/backlog.md" >/dev/null
   fm_write_meta "$case_dir/state/task-x1.meta" \
     "window=fm-task-x1" \
     "worktree=$case_dir/wt" \
@@ -52,7 +55,7 @@ make_torn_down_case() {
   local name=$1 case_dir fakebin
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
-  mkdir -p "$case_dir/state" "$case_dir/data" "$fakebin"
+  mkdir -p "$case_dir/state" "$case_dir/data" "$case_dir/config" "$fakebin"
   tasks-axi add task-x1 "Torn down task" --kind ship --file "$case_dir/data/backlog.md" >/dev/null
   printf '%s\n' "$case_dir"
 }
@@ -64,10 +67,12 @@ add_gh_mocks() {
   cat > "$case_dir/fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+printf '%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_AXI_HOST_LOG"
 exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
+printf '%s\n' "\${GH_HOST:-}" >> "\$FM_TEST_GH_HOST_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
@@ -104,7 +109,10 @@ run_pr_merge() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
+  FM_TEST_GH_AXI_HOST_LOG="$case_dir/gh-axi-host.log" \
+  FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -258,6 +266,102 @@ test_missing_meta_refuses_before_merge() {
   pass "fm-pr-merge refuses an unknown task before merging"
 }
 
+test_manual_backend_refuses_unknown_live_task_before_merge() {
+  local case_dir rc url
+  case_dir=$(make_case manual-unknown-live)
+  url=https://github.com/example/repo/pull/26
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  tasks-axi rm task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+  add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "manual-unknown-live: fm-pr-merge should refuse an unknown live task"
+  assert_grep 'no retained backlog item exists for task-x1' "$case_dir/stderr" \
+    "manual-unknown-live: refusal did not identify the missing retained task"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "manual-unknown-live: gh-axi pr merge was invoked"
+  pass "fm-pr-merge refuses an unknown live task with the manual backlog backend"
+}
+
+test_manual_backend_refuses_conflicting_live_pr_before_merge() {
+  local case_dir rc url existing_url
+  case_dir=$(make_case manual-conflicting-live)
+  url=https://github.com/example/repo/pull/27
+  existing_url=https://github.com/example/repo/pull/99
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  tasks-axi update task-x1 --pr "$existing_url" --file "$case_dir/data/backlog.md" >/dev/null
+  add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "manual-conflicting-live: fm-pr-merge should refuse a conflicting live PR"
+  assert_grep 'retained backlog item has a conflicting PR link for task-x1' "$case_dir/stderr" \
+    "manual-conflicting-live: refusal did not identify the canonical-link conflict"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "manual-conflicting-live: gh-axi pr merge was invoked"
+  pass "fm-pr-merge refuses a conflicting live PR with the manual backlog backend"
+}
+
+test_default_backend_refuses_unavailable_automation_before_merge() {
+  local case_dir rc
+  case_dir=$(make_torn_down_case unavailable-automation)
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/28 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unavailable-automation: fm-pr-merge should refuse before merging"
+  assert_grep 'configured tasks-axi backend is unavailable' "$case_dir/stderr" \
+    "unavailable-automation: refusal did not identify unavailable automation"
+  [ ! -s "$case_dir/gh-axi.log" ] || fail "unavailable-automation: gh-axi pr merge was invoked"
+  pass "fm-pr-merge refuses a configured but unavailable automated backlog path"
+}
+
+test_manual_backend_records_torn_down_merge_without_tasks_axi_done() {
+  local case_dir real_tasks_axi url
+  case_dir=$(make_torn_down_case manual-torn-down-merge)
+  real_tasks_axi=$(command -v tasks-axi)
+  url=https://github.com/example/repo/pull/29
+  printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  done) printf '%s\\n' "\$*" >> "$case_dir/tasks-axi-done.log"; exit 99 ;;
+  *) exec "$real_tasks_axi" "\$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+  : > "$case_dir/tasks-axi-done.log"
+
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "manual-torn-down-merge: manual backlog completion failed"
+
+  [ ! -s "$case_dir/tasks-axi-done.log" ] \
+    || fail "manual-torn-down-merge: manual backend delegated completion to tasks-axi"
+  assert_grep "$url" "$case_dir/data/backlog.md" \
+    "manual-torn-down-merge: manual backend did not record the merged PR"
+  tasks-axi show task-x1 --full --file "$case_dir/data/backlog.md" | grep -qxF '  state: done' \
+    || fail "manual-torn-down-merge: manual backend did not move the task to Done"
+  pass "fm-pr-merge records a torn-down merge through the configured manual backlog backend"
+}
+
 test_torn_down_task_merge_failure_does_not_close_backlog() {
   local case_dir rc url
   case_dir=$(make_torn_down_case torn-down-merge-refused)
@@ -345,9 +449,9 @@ test_rejects_unsafe_url_segments_before_recording() {
   pass "fm-pr-merge refuses unsafe PR URL segments before recording state"
 }
 
-test_repo_override_args_refuse_before_recording() {
+test_identity_override_args_refuse_before_recording() {
   local case_dir rc
-  case_dir=$(make_case repo-override)
+  case_dir=$(make_case identity-override)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
   : > "$case_dir/gh-axi.log"
@@ -358,17 +462,48 @@ test_repo_override_args_refuse_before_recording() {
   rc=$?
   set -e
 
-  expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
+  expect_code 1 "$rc" "identity-override: fm-pr-merge should refuse repository override flags"
   assert_grep 'extra merge arguments must not override the repository' "$case_dir/stderr" \
-    "repo-override: refusal did not explain the repo override"
+    "identity-override: refusal did not explain the repository override"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/5 -- --hostname wrong.example \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "identity-override: fm-pr-merge should refuse hostname override flags"
+  assert_grep 'extra merge arguments must not override the canonical host' "$case_dir/stderr" \
+    "identity-override: refusal did not explain the hostname override"
   assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
-    "repo-override: PR URL was recorded before rejecting repo override"
+    "identity-override: PR URL was recorded before rejecting hostname override"
   assert_absent "$case_dir/state/task-x1.check.sh" \
-    "repo-override: repo override armed a merge poll"
+    "identity-override: hostname override armed a merge poll"
   assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
-    "repo-override: gh-axi pr merge was invoked despite repo override"
-  pass "fm-pr-merge refuses repo override args before recording state"
+    "identity-override: gh-axi pr merge was invoked despite hostname override"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/5 -- --hostname=wrong.example \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "identity-override: fm-pr-merge should refuse equals-form hostname overrides"
+  assert_grep 'extra merge arguments must not override the canonical host' "$case_dir/stderr" \
+    "identity-override: equals-form refusal did not explain the hostname override"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/5 -- --api-host=wrong.example \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "identity-override: fm-pr-merge should refuse future host-selecting flags"
+  assert_grep 'extra merge arguments must not override the canonical host' "$case_dir/stderr" \
+    "identity-override: future host-flag refusal did not explain the hostname override"
+  pass "fm-pr-merge refuses repository and hostname override args before recording state"
 }
+
 
 test_explicit_merge_method_not_overridden() {
   local case_dir
@@ -400,6 +535,25 @@ test_method_equals_merge_method_not_overridden() {
   pass "fm-pr-merge respects --method=<value> as an explicit merge method"
 }
 
+test_binds_github_enterprise_merge_to_canonical_host() {
+  local case_dir url
+  case_dir=$(make_case github-enterprise)
+  url=https://github.internal/my-org/my-repo/pull/127
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-axi-host.log"
+
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-enterprise: fm-pr-merge rejected a GitHub Enterprise PR URL"
+
+  grep -qxF 'pr merge 127 --repo my-org/my-repo --squash' "$case_dir/gh-axi.log" \
+    || fail "github-enterprise: gh-axi did not receive the Enterprise PR identity"
+  grep -qxF github.internal "$case_dir/gh-axi-host.log" \
+    || fail "github-enterprise: gh-axi was not bound to the canonical Enterprise host"
+  pass "fm-pr-merge accepts GitHub Enterprise PRs and binds gh-axi to their host"
+}
+
 test_parses_pr_url_for_gh_axi() {
   local case_dir
   case_dir=$(make_case url-parsing)
@@ -422,11 +576,16 @@ test_torn_down_task_merges_and_records_backlog
 test_torn_down_task_preserves_canonical_backlog_pr
 test_torn_down_task_refuses_conflicting_backlog_pr
 test_missing_meta_refuses_before_merge
+test_manual_backend_refuses_unknown_live_task_before_merge
+test_manual_backend_refuses_conflicting_live_pr_before_merge
+test_default_backend_refuses_unavailable_automation_before_merge
+test_manual_backend_records_torn_down_merge_without_tasks_axi_done
 test_torn_down_task_merge_failure_does_not_close_backlog
 test_help_describes_cleanup_fallback
 test_malformed_url_refuses_before_merge
 test_rejects_unsafe_url_segments_before_recording
-test_repo_override_args_refuse_before_recording
+test_identity_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
+test_binds_github_enterprise_merge_to_canonical_host
 test_parses_pr_url_for_gh_axi

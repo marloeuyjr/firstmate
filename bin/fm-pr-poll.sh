@@ -45,12 +45,28 @@ case "$number" in
   *[!0-9]*) exit 0 ;;
 esac
 
+forge_host_valid() {
+  local value=$1 label
+  local -a labels
+  [ "${#value}" -ge 1 ] && [ "${#value}" -le 253 ] || return 1
+  case "$value" in
+    .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
+  esac
+  IFS=. read -ra labels <<< "$value"
+  for label in "${labels[@]}"; do
+    [ "${#label}" -ge 1 ] && [ "${#label}" -le 63 ] || return 1
+    case "$label" in
+      -*|*-) return 1 ;;
+    esac
+  done
+}
+
 # Every component is revalidated here rather than trusted from the sidecar, and
 # the stored URL must then be exactly reconstructible from those components, so
 # a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
-    [ "$host" = github.com ] || exit 0
+    forge_host_valid "$host" || exit 0
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
@@ -61,16 +77,13 @@ case "$provider" in
     case "$repo" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
-    [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    state=$(GH_HOST="$host" gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)
-    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    forge_host_valid "$host" || exit 0
     [ "$host" != github.com ] || exit 0
-    case "$host" in
-      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
-    esac
     [ "${#path}" -ge 3 ] && [ "${#path}" -le 1024 ] || exit 0
     case "$path" in
       /*|*/|*//*) exit 0 ;;
