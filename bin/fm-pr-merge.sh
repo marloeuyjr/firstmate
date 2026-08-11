@@ -108,6 +108,21 @@ reject_deferred_merge_modes() {
   done
 }
 
+reject_target_merge_queue() {
+  local merge_queue
+  if ! merge_queue=$(GH_HOST="$PR_HOST" gh api graphql \
+    -f query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { mergeQueue { id } } } }' \
+    -f owner="$PR_OWNER" -f name="$PR_REPO" -F number="$PR_NUMBER" \
+    --jq '.data.repository.pullRequest.mergeQueue != null' 2>/dev/null); then
+    echo "error: could not determine whether the target branch requires a merge queue" >&2
+    return 1
+  fi
+  if [ "$merge_queue" != false ]; then
+    echo "error: cleaned-up tasks cannot merge into a branch that requires a merge queue" >&2
+    return 1
+  fi
+}
+
 confirm_pr_merged() {
   local state
   if ! state=$(GH_HOST="$PR_HOST" gh pr view "$URL" --json state -q .state 2>/dev/null); then
@@ -337,6 +352,7 @@ fi
 
 if [ "$BACKLOG_RECORD" -eq 1 ]; then
   reject_deferred_merge_modes "$@" || exit 1
+  reject_target_merge_queue || exit 1
 fi
 
 GH_HOST="$PR_HOST" gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"

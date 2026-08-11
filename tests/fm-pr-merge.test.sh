@@ -74,6 +74,8 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "\${GH_HOST:-}" >> "\$FM_TEST_GH_HOST_LOG"
 case "\${1:-} \${2:-}" in
+  "api graphql")
+    printf '%s\n' "\${FM_TEST_MERGE_QUEUE_REQUIRED:-false}" ; exit 0 ;;
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
@@ -100,6 +102,9 @@ exit 0
 SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "api graphql") printf '%s\n' false ; exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
@@ -115,6 +120,7 @@ run_pr_merge() {
   FM_TEST_GH_AXI_HOST_LOG="$case_dir/gh-axi-host.log" \
   FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
   FM_TEST_GH_STATE="${FM_TEST_GH_STATE:-MERGED}" \
+  FM_TEST_MERGE_QUEUE_REQUIRED="${FM_TEST_MERGE_QUEUE_REQUIRED:-false}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -230,6 +236,33 @@ test_torn_down_task_rejects_deferred_merge_modes() {
   assert_no_grep 'https://github.com/example/repo/pull/30' "$case_dir/data/backlog.md" \
     "torn-down-deferred-merge: deferred mode changed the retained task"
   pass "fm-pr-merge rejects deferred merge modes for fully cleaned-up tasks"
+}
+
+test_torn_down_task_refuses_target_merge_queue() {
+  local case_dir rc url
+  case_dir=$(make_torn_down_case torn-down-required-merge-queue)
+  url=https://github.com/example/repo/pull/33
+  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-host.log"
+
+  set +e
+  FM_TEST_MERGE_QUEUE_REQUIRED=true run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-required-merge-queue: fm-pr-merge should refuse"
+  grep -qxF github.com "$case_dir/gh-host.log" \
+    || fail "torn-down-required-merge-queue: policy query was not bound to the canonical host"
+  assert_grep 'error: cleaned-up tasks cannot merge into a branch that requires a merge queue' \
+    "$case_dir/stderr" \
+    "torn-down-required-merge-queue: refusal did not identify the required queue"
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "torn-down-required-merge-queue: gh-axi was invoked for a required queue"
+  assert_no_grep "$url" "$case_dir/data/backlog.md" \
+    "torn-down-required-merge-queue: required queue changed the retained task"
+  pass "fm-pr-merge refuses an implicit target-branch merge queue before merging"
 }
 
 test_torn_down_task_requires_confirmed_merged_state() {
@@ -647,6 +680,7 @@ test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_torn_down_task_merges_and_records_backlog
 test_torn_down_task_rejects_deferred_merge_modes
+test_torn_down_task_refuses_target_merge_queue
 test_torn_down_task_requires_confirmed_merged_state
 test_torn_down_enterprise_merge_binds_confirmation_to_canonical_host
 test_torn_down_task_preserves_canonical_backlog_pr
