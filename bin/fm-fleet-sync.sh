@@ -356,7 +356,7 @@ sync_project() {
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain --ignore-submodules=none 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$(git -C "$PROJ" status --porcelain --ignore-submodules=none --untracked-files=all 2>/dev/null | head -1)" ] || dirty=yes
   recovered_reattach=no
   recovered_submodules=
 

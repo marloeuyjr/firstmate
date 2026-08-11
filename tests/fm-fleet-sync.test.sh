@@ -90,7 +90,7 @@ head_sha() { git -C "$1" rev-parse HEAD; }
 # The optional second submodule exercises mixed-pointer safety cases.
 # The returned clone initializes the submodule through Git's executable interface.
 build_submodule_pair() {
-  local home=$1 name=$2 with_second=${3:-no} inner_work inner_remote work remote clone remote_abs inner_remote_abs
+  local home=$1 name=$2 with_second=${3:-no} submodule_path=${4:-core/openelis} submodule_add_path inner_work inner_remote work remote clone remote_abs inner_remote_abs
   inner_work="$home/submodule-work-$name"
   inner_remote="$home/remotes/$name-openelis.git"
   work="$home/work-$name"
@@ -111,8 +111,19 @@ build_submodule_pair() {
   git init -q "$work"
   git -C "$work" symbolic-ref HEAD refs/heads/main
   commit_file "$work" file.txt v0 C0
+  submodule_add_path=$submodule_path
+  case "$submodule_path" in
+    *$'\n'*) submodule_add_path=core/plain ;;
+  esac
   git -C "$work" -c protocol.file.allow=always submodule add -q \
-    "file://$inner_remote_abs" core/openelis
+    "file://$inner_remote_abs" "$submodule_add_path"
+  if [ "$submodule_add_path" != "$submodule_path" ]; then
+    git -C "$work" config --file .gitmodules --rename-section \
+      "submodule.$submodule_add_path" submodule.openelis
+    git -C "$work" config --file .gitmodules submodule.openelis.path "$submodule_path"
+    mv "$work/$submodule_add_path" "$work/$submodule_path"
+    git -C "$work" update-index --force-remove -- "$submodule_add_path"
+  fi
   if [ "$with_second" = with-second ]; then
     git -C "$work" -c protocol.file.allow=always submodule add -q \
       "file://$inner_remote_abs" core/second
@@ -421,6 +432,29 @@ test_anchored_submodule_pointer_drift_recovers_and_syncs() {
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "recovered clone did not sync to origin/main"
   pass "anchored unstaged submodule pointer drift is restored and synced"
+}
+
+test_newline_submodule_pointer_drift_recovers_and_syncs() {
+  local home clone path inner out expected
+  home=$(new_home)
+  path=$'core/new\nline'
+  clone=$(build_submodule_pair "$home" submodule-newline no "$path")
+  inner="$clone/$path"
+  git -C "$inner" checkout --detach --quiet origin/main^
+  advance_origin "$home" submodule-newline C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-newline: recovered: restored submodule pointer" \
+    "newline submodule pointer drift is visibly recovered"
+  assert_not_contains "$out" "STUCK" "newline submodule pointer drift is not stuck"
+  [ -z "$(git -C "$clone" status --porcelain --ignore-submodules=none)" ] \
+    || fail "newline submodule clone remained dirty"
+  expected=$(git -C "$clone" ls-tree HEAD -- "$path" | awk '{print $3}')
+  [ "$(head_sha "$inner")" = "$expected" ] || fail "newline submodule did not return to its recorded pin"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "newline submodule clone did not sync to origin/main"
+  pass "newline-named submodule pointer drift is restored and synced"
 }
 
 test_staged_submodule_pointer_is_stuck_untouched() {
@@ -901,6 +935,7 @@ test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_anchored_submodule_pointer_drift_recovers_and_syncs
+test_newline_submodule_pointer_drift_recovers_and_syncs
 test_staged_submodule_pointer_is_stuck_untouched
 test_dirty_submodule_inner_tree_is_stuck_untouched
 test_untracked_submodule_inner_tree_is_stuck_untouched

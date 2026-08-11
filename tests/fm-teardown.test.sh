@@ -243,7 +243,7 @@ wt_commit_file() {
 # Add an initialized submodule, then advance only its inner HEAD.
 # The umbrella index remains on the recorded baseline pointer.
 add_submodule_pointer_drift() {
-  local case_dir=$1 inner
+  local case_dir=$1 path=${2:-core/openelis} submodule_add_path inner
   git init -q --bare "$case_dir/submodule-origin.git"
   git -C "$case_dir/submodule-origin.git" symbolic-ref HEAD refs/heads/main
   git clone -q "$case_dir/submodule-origin.git" "$case_dir/submodule-seed" 2>/dev/null
@@ -253,23 +253,34 @@ add_submodule_pointer_drift() {
   git -C "$case_dir/submodule-seed" push -q origin main
   rm -rf "$case_dir/submodule-seed"
 
+  submodule_add_path=$path
+  case "$path" in
+    *$'\n'*) submodule_add_path=core/plain ;;
+  esac
   git -C "$case_dir/project" -c protocol.file.allow=always submodule add -q \
-    "$case_dir/submodule-origin.git" core/openelis
-  git -C "$case_dir/project" add .gitmodules core/openelis
+    "$case_dir/submodule-origin.git" "$submodule_add_path"
+  if [ "$submodule_add_path" != "$path" ]; then
+    git -C "$case_dir/project" config --file .gitmodules --rename-section \
+      "submodule.$submodule_add_path" submodule.openelis
+    git -C "$case_dir/project" config --file .gitmodules submodule.openelis.path "$path"
+    mv "$case_dir/project/$submodule_add_path" "$case_dir/project/$path"
+    git -C "$case_dir/project" update-index --force-remove -- "$submodule_add_path"
+  fi
+  git -C "$case_dir/project" add .gitmodules "$path"
   git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -q -m "add submodule"
   git -C "$case_dir/project" push -q origin main
   git -C "$case_dir/wt" merge -q --ff-only main
   git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init --recursive
 
-  inner="$case_dir/wt/core/openelis"
+  inner="$case_dir/wt/$path"
   printf '%s\n' landed > "$inner/landed.txt"
   git -C "$inner" add landed.txt
   git -C "$inner" -c user.email=t@t -c user.name=t commit -q -m "inner landed work"
 }
 
 anchor_submodule_head_on_origin() {
-  local case_dir=$1 inner
-  inner="$case_dir/wt/core/openelis"
+  local case_dir=$1 path=${2:-core/openelis} inner
+  inner="$case_dir/wt/$path"
   git -C "$inner" push -q origin HEAD:main
   git -C "$inner" fetch -q origin
 }
@@ -972,6 +983,32 @@ test_submodule_pointer_drift_on_origin_is_restored() {
   status=$(git -C "$case_dir/wt" status --porcelain)
   [ -z "$status" ] || fail "submodule-pointer-origin: returned slot stayed dirty: $status"
   pass "teardown restores a clean origin-anchored submodule pointer before returning the slot"
+}
+
+test_newline_submodule_pointer_drift_is_restored() {
+  local case_dir path inner rc status expected
+  case_dir=$(make_case submodule-pointer-newline)
+  path=$'core/new\nline'
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir" "$path"
+  anchor_submodule_head_on_origin "$case_dir" "$path"
+  inner="$case_dir/wt/$path"
+  expected=$(git -C "$case_dir/wt" ls-tree HEAD -- "$path" | awk '{print $3}')
+
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -n "$status" ] || fail "submodule-pointer-newline: fixture did not create umbrella drift"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "submodule-pointer-newline: teardown should restore newline pointer drift"
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  [ -z "$status" ] || fail "submodule-pointer-newline: returned slot stayed dirty: $status"
+  [ "$(git -C "$inner" rev-parse HEAD)" = "$expected" ] \
+    || fail "submodule-pointer-newline: inner HEAD did not return to its recorded pin"
+  pass "teardown restores a newline-named submodule pointer before returning the slot"
 }
 
 test_submodule_pointer_drift_recovery_output_stays_visible() {
@@ -2783,6 +2820,7 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_submodule_pointer_drift_on_origin_is_restored
+test_newline_submodule_pointer_drift_is_restored
 test_submodule_pointer_drift_recovery_output_stays_visible
 test_submodule_dirty_inner_tree_refuses
 test_submodule_untracked_inner_files_refuse

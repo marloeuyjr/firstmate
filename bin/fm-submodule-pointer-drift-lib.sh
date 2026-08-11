@@ -27,7 +27,8 @@ fm_submodule_drift_canonical_existing_dir() {
 fm_restore_anchored_submodule_pointer_drift() {
   local dry_run=no worktree worktree_abs
   local config_entry path submodule submodule_head submodule_git_dir
-  local inner_status diff_rc local_anchor_survives target eligible entry
+  local inner_status diff_rc local_anchor_survives target
+  local -a eligible_paths=()
 
   if [ "${1:-}" = --dry-run ]; then
     dry_run=yes
@@ -41,7 +42,6 @@ fm_restore_anchored_submodule_pointer_drift() {
   git -C "$worktree" config --file .gitmodules --get-regexp '^submodule\..*\.path$' \
     >/dev/null 2>&1 || return 0
 
-  eligible=
   # Collect every eligible submodule and preflight its recorded target object
   # locally before any checkout, so a missing target refuses without altering
   # the worktree (no partial recovery).
@@ -92,22 +92,21 @@ fm_restore_anchored_submodule_pointer_drift() {
       echo "REFUSED: recorded submodule pointer target $target for $path is not available locally in $worktree." >&2
       return 1
     fi
-    eligible+="${path}"$'\n'
+    eligible_paths+=("$path")
   done < <(git -C "$worktree" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$')
 
-  [ -n "$eligible" ] || return 0
+  [ "${#eligible_paths[@]}" -gt 0 ] || return 0
 
   # Restore each eligible submodule (or only list it under --dry-run). Route the
   # checkout progress to stderr so a structured-stdout caller stays clean while a
   # stderr-surfacing caller still observes it.
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
+  for path in "${eligible_paths[@]}"; do
     if [ "$dry_run" = no ]; then
-      if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$entry" >&2 </dev/null; then
-        echo "REFUSED: cannot restore landed submodule pointer $entry in $worktree." >&2
+      if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$path" >&2 </dev/null; then
+        echo "REFUSED: cannot restore landed submodule pointer $path in $worktree." >&2
         return 1
       fi
     fi
-    printf '%s\n' "$entry"
-  done <<< "$eligible"
+    printf '%s\n' "$path"
+  done
 }
