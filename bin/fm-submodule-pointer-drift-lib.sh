@@ -4,7 +4,8 @@
 # branch ref that survives the outer worktree's removal.
 #
 # fm_restore_anchored_submodule_pointer_drift [--dry-run] <worktree> emits each
-# eligible submodule path on stdout and restores it unless --dry-run is given.
+# eligible submodule path as a NUL-delimited record on stdout and restores it
+# unless --dry-run is given.
 # It leaves staged gitlink changes, dirty or untracked inner trees, unanchored
 # inner HEADs, and every non-gitlink outer change untouched.
 # Before any checkout it preflights every eligible submodule's recorded target
@@ -27,6 +28,8 @@ fm_restore_anchored_submodule_pointer_drift() {
   local dry_run=no worktree worktree_abs
   local config_entry path submodule submodule_head submodule_git_dir
   local inner_status diff_rc local_anchor_survives target
+  local index rollback_index original_head
+  local -a original_heads restored_paths restored_heads
 
   if [ "${1:-}" = --dry-run ]; then
     dry_run=yes
@@ -96,6 +99,7 @@ fm_restore_anchored_submodule_pointer_drift() {
       return 1
     fi
     FM_SUBMODULE_POINTER_DRIFT_PATHS+=("$path")
+    original_heads+=("$submodule_head")
   done < <(git -C "$worktree" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$')
 
   [ "${#FM_SUBMODULE_POINTER_DRIFT_PATHS[@]}" -gt 0 ] || return 0
@@ -103,13 +107,26 @@ fm_restore_anchored_submodule_pointer_drift() {
   # Restore each eligible submodule (or only list it under --dry-run). Route the
   # checkout progress to stderr so a structured-stdout caller stays clean while a
   # stderr-surfacing caller still observes it.
-  for path in "${FM_SUBMODULE_POINTER_DRIFT_PATHS[@]}"; do
+  for ((index = 0; index < ${#FM_SUBMODULE_POINTER_DRIFT_PATHS[@]}; index++)); do
+    path=${FM_SUBMODULE_POINTER_DRIFT_PATHS[$index]}
     if [ "$dry_run" = no ]; then
       if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$path" >&2 </dev/null; then
+        for ((rollback_index = ${#restored_paths[@]} - 1; rollback_index >= 0; rollback_index--)); do
+          if ! git -C "$worktree/${restored_paths[$rollback_index]}" checkout --detach --quiet \
+            "${restored_heads[$rollback_index]}" >&2 </dev/null; then
+            echo "REFUSED: cannot roll back submodule pointer ${restored_paths[$rollback_index]} in $worktree." >&2
+          fi
+        done
         echo "REFUSED: cannot restore landed submodule pointer $path in $worktree." >&2
         return 1
       fi
+      restored_paths+=("$path")
+      original_head=${original_heads[$index]}
+      restored_heads+=("$original_head")
     fi
+  done
+
+  for path in "${FM_SUBMODULE_POINTER_DRIFT_PATHS[@]}"; do
     printf '%s\0' "$path"
   done
 }

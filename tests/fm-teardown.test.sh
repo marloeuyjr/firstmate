@@ -285,6 +285,22 @@ anchor_submodule_head_on_origin() {
   git -C "$inner" fetch -q origin
 }
 
+add_second_submodule_pointer_drift() {
+  local case_dir=$1 path=${2:-core/second} inner
+  git -C "$case_dir/project" -c protocol.file.allow=always submodule add -q \
+    "$case_dir/submodule-origin.git" "$path"
+  git -C "$case_dir/project" add .gitmodules "$path"
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t commit -q -m "add second submodule"
+  git -C "$case_dir/project" push -q origin main
+  git -C "$case_dir/wt" merge -q --ff-only main
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init -- "$path"
+
+  inner="$case_dir/wt/$path"
+  printf '%s\n' second-landed > "$inner/second-landed.txt"
+  git -C "$inner" add second-landed.txt
+  git -C "$inner" -c user.email=t@t -c user.name=t commit -q -m "second inner landed work"
+}
+
 embed_submodule_git_dir_in_worktree() {
   local case_dir=$1 inner old_git_dir embedded_git_dir exclude
   inner="$case_dir/wt/core/openelis"
@@ -1032,6 +1048,37 @@ test_submodule_pointer_drift_recovery_output_stays_visible() {
   grep -q "Submodule path 'core/openelis': checked out" "$case_dir/stderr" \
     || fail "submodule-recovery-visible: teardown hid the submodule pointer recovery output"
   pass "teardown keeps the submodule pointer recovery output visible"
+}
+
+test_later_submodule_checkout_failure_rolls_back_earlier_recovery() {
+  local case_dir rc safe blocked safe_before blocked_before blocked_git_dir
+  case_dir=$(make_case submodule-checkout-failure)
+  write_meta "$case_dir" no-mistakes ship
+  add_submodule_pointer_drift "$case_dir"
+  anchor_submodule_head_on_origin "$case_dir"
+  add_second_submodule_pointer_drift "$case_dir"
+  anchor_submodule_head_on_origin "$case_dir" core/second
+  safe="$case_dir/wt/core/openelis"
+  blocked="$case_dir/wt/core/second"
+  safe_before=$(git -C "$safe" rev-parse HEAD)
+  blocked_before=$(git -C "$blocked" rev-parse HEAD)
+  blocked_git_dir=$(git -C "$blocked" rev-parse --absolute-git-dir)
+  : > "$blocked_git_dir/index.lock"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  rm -f "$blocked_git_dir/index.lock"
+
+  expect_code 1 "$rc" "submodule-checkout-failure: teardown must refuse a failed recovery"
+  [ "$(git -C "$safe" rev-parse HEAD)" = "$safe_before" ] \
+    || fail "submodule-checkout-failure: the earlier submodule stayed restored"
+  [ "$(git -C "$blocked" rev-parse HEAD)" = "$blocked_before" ] \
+    || fail "submodule-checkout-failure: the blocked submodule changed"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "submodule-checkout-failure: failed recovery removed the task record"
+  pass "teardown rolls back earlier pointer recovery when a later checkout fails"
 }
 
 test_submodule_dirty_inner_tree_refuses() {
@@ -2822,6 +2869,7 @@ test_content_fallback_refreshes_stale_origin_ref
 test_submodule_pointer_drift_on_origin_is_restored
 test_newline_submodule_pointer_drift_is_restored
 test_submodule_pointer_drift_recovery_output_stays_visible
+test_later_submodule_checkout_failure_rolls_back_earlier_recovery
 test_submodule_dirty_inner_tree_refuses
 test_submodule_untracked_inner_files_refuse
 test_submodule_unanchored_head_refuses
