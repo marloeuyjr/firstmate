@@ -96,6 +96,30 @@ reject_identity_overrides() {
 
 reject_identity_overrides "$@" || exit 1
 
+reject_deferred_merge_modes() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --auto|--auto=*|--*queue*|--*defer*)
+        echo "error: cleaned-up tasks cannot use deferred merge modes" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+confirm_pr_merged() {
+  local state
+  if ! state=$(GH_HOST="$PR_HOST" gh pr view "$URL" --json state -q .state 2>/dev/null); then
+    echo "error: could not confirm the PR merged on $PR_HOST" >&2
+    return 1
+  fi
+  if [ "$state" != MERGED ]; then
+    echo "error: PR is not merged on $PR_HOST" >&2
+    return 1
+  fi
+}
+
 RETAINED_PR_LINK=0
 backlog_legacy_pr_is_absent_or_canonical() {
   local line fragment candidate pr_count=0 seen=0
@@ -311,9 +335,14 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
+if [ "$BACKLOG_RECORD" -eq 1 ]; then
+  reject_deferred_merge_modes "$@" || exit 1
+fi
+
 GH_HOST="$PR_HOST" gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
 
 if [ "$BACKLOG_RECORD" -eq 1 ]; then
+  confirm_pr_merged || exit 1
   if [ "$BACKLOG_MANUAL" -eq 1 ]; then
     backlog_mark_done_manually || {
       echo "error: merged PR could not be recorded in the task backlog" >&2

@@ -77,6 +77,7 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
+      *' --json state '*) printf '%s\n' "\${FM_TEST_GH_STATE:-MERGED}" ; exit 0 ;;
     esac
     ;;
 esac
@@ -113,6 +114,7 @@ run_pr_merge() {
   FM_TEST_GH_AXI_LOG="$case_dir/gh-axi.log" \
   FM_TEST_GH_AXI_HOST_LOG="$case_dir/gh-axi-host.log" \
   FM_TEST_GH_HOST_LOG="$case_dir/gh-host.log" \
+  FM_TEST_GH_STATE="${FM_TEST_GH_STATE:-MERGED}" \
   PATH="$case_dir/fakebin:$PATH" \
     "$PR_MERGE" "$@"
   rc=$?
@@ -204,6 +206,77 @@ test_torn_down_task_merges_and_records_backlog() {
       "torn-down-merge: merge left a watcher artifact"
   done
   pass "fm-pr-merge records a cleaned-up task's merged PR without recreating a watcher poll"
+}
+
+test_torn_down_task_rejects_deferred_merge_modes() {
+  local case_dir rc mode
+  case_dir=$(make_torn_down_case torn-down-deferred-merge)
+  add_gh_mocks "$case_dir" 3333333333333333333333333333333333333333
+  : > "$case_dir/gh-axi.log"
+
+  for mode in --auto --merge-queue --defer; do
+    set +e
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/30 -- "$mode" \
+      > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 1 "$rc" "torn-down-deferred-merge: fm-pr-merge should reject $mode"
+    assert_grep 'error: cleaned-up tasks cannot use deferred merge modes' "$case_dir/stderr" \
+      "torn-down-deferred-merge: refusal did not identify the deferred mode"
+  done
+  [ ! -s "$case_dir/gh-axi.log" ] \
+    || fail "torn-down-deferred-merge: gh-axi was invoked for a deferred mode"
+  assert_no_grep 'https://github.com/example/repo/pull/30' "$case_dir/data/backlog.md" \
+    "torn-down-deferred-merge: deferred mode changed the retained task"
+  pass "fm-pr-merge rejects deferred merge modes for fully cleaned-up tasks"
+}
+
+test_torn_down_task_requires_confirmed_merged_state() {
+  local case_dir rc url
+  case_dir=$(make_torn_down_case torn-down-unconfirmed-merge)
+  url=https://github.com/example/repo/pull/31
+  add_gh_mocks "$case_dir" 4444444444444444444444444444444444444444
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-host.log"
+
+  set +e
+  FM_TEST_GH_STATE=OPEN run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "torn-down-unconfirmed-merge: fm-pr-merge should refuse an open PR"
+  grep -qxF 'pr merge 31 --repo example/repo --squash' "$case_dir/gh-axi.log" \
+    || fail "torn-down-unconfirmed-merge: gh-axi merge was not invoked"
+  grep -qxF github.com "$case_dir/gh-host.log" \
+    || fail "torn-down-unconfirmed-merge: state check was not bound to the canonical host"
+  assert_grep 'error: PR is not merged on github.com' "$case_dir/stderr" \
+    "torn-down-unconfirmed-merge: refusal did not identify the open PR"
+  assert_no_grep "$url" "$case_dir/data/backlog.md" \
+    "torn-down-unconfirmed-merge: open PR was recorded as completed"
+  pass "fm-pr-merge requires a canonical merged-state confirmation before completion"
+}
+
+test_torn_down_enterprise_merge_binds_confirmation_to_canonical_host() {
+  local case_dir url
+  case_dir=$(make_torn_down_case torn-down-enterprise-merge)
+  url=https://github.internal/my-org/my-repo/pull/32
+  add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  : > "$case_dir/gh-axi.log"
+  : > "$case_dir/gh-axi-host.log"
+  : > "$case_dir/gh-host.log"
+
+  run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "torn-down-enterprise-merge: fm-pr-merge rejected a merged Enterprise PR"
+
+  grep -qxF github.internal "$case_dir/gh-axi-host.log" \
+    || fail "torn-down-enterprise-merge: gh-axi was not bound to the canonical host"
+  grep -qxF github.internal "$case_dir/gh-host.log" \
+    || fail "torn-down-enterprise-merge: state confirmation was not bound to the canonical host"
+  assert_grep "$url" "$case_dir/data/backlog.md" \
+    "torn-down-enterprise-merge: merged Enterprise PR was not recorded"
+  pass "fm-pr-merge binds cleaned-up Enterprise merges and confirmation to one host"
 }
 
 test_torn_down_task_preserves_canonical_backlog_pr() {
@@ -573,6 +646,9 @@ test_records_pr_and_head_before_merging
 test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_torn_down_task_merges_and_records_backlog
+test_torn_down_task_rejects_deferred_merge_modes
+test_torn_down_task_requires_confirmed_merged_state
+test_torn_down_enterprise_merge_binds_confirmation_to_canonical_host
 test_torn_down_task_preserves_canonical_backlog_pr
 test_torn_down_task_refuses_conflicting_backlog_pr
 test_missing_meta_refuses_before_merge
