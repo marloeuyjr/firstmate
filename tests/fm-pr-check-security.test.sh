@@ -65,6 +65,7 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+printf '%s\n' "${GH_HOST:-}" >> "$FM_TEST_GH_HOST_LOG"
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
@@ -90,6 +91,7 @@ printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TES
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
   : > "$dir/gh.log"
+  : > "$dir/gh-host.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
   : > "$dir/guard.log"
@@ -105,6 +107,15 @@ write_task_meta() {
     "project=$dir/project" \
     "kind=ship" \
     "mode=no-mistakes"
+}
+
+write_backlog_task() {
+  local dir=$1 id=$2 file="$1/home/data/backlog.md"
+  if tasks-axi add "$id" "Test task" --kind ship --file "$file" >/dev/null 2>&1; then
+    return 0
+  fi
+  printf '%s\n' '# Backlog' '' '## In flight' "- [ ] $id - Test task (kind: ship) (since 2026-08-11)" \
+    '## Queued' '## Done' > "$file"
 }
 
 write_poll_meta() {
@@ -238,18 +249,21 @@ run_check_entry() {
   shift
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_HOST_LOG="$dir/gh-host.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
 
 run_merge_entry() {
-  local dir=$1
+  local dir=$1 tasks_axi_dir
   shift
+  tasks_axi_dir=$(dirname "$(command -v tasks-axi)")
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_HOST_LOG="$dir/gh-host.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    PATH="$dir/fakebin:$BASE_PATH" \
+    PATH="$dir/fakebin:$tasks_axi_dir:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
 
@@ -320,10 +334,10 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1/files'
   'https://github.com/o/r/pull/1?q=x'
   'https://github.com/o/r/pull/1#f'
-  'https://github.com.evil/o/r/pull/1'
-  'https://evilgithub.com/o/r/pull/1'
+  'https://-github.example/o/r/pull/1'
+  'https://github-.example/o/r/pull/1'
+  'https://github..example/o/r/pull/1'
   'https://gıthub.com/o/r/pull/1'
-  'https://xn--gthub-3va.com/o/r/pull/1'
   'http://github.com/o/r/pull/1'
   'ssh://github.com/o/r/pull/1'
   'git://github.com/o/r/pull/1'
@@ -518,6 +532,7 @@ test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
+  write_backlog_task "$dir" task-a
   expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
@@ -573,6 +588,7 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
+  write_backlog_task "$dir" Task_A.1
   run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
@@ -600,6 +616,7 @@ SH
       "project=$dir/project" \
       'kind=ship' \
       'mode=local-only'
+    write_backlog_task "$dir" "$id"
     mkdir -p "$dir/home/state/.pr-check-quarantine"
     chmod 0700 "$dir/home/state/.pr-check-quarantine"
     printf 'reserved migration evidence\n' \
@@ -705,8 +722,8 @@ make_poll_fixture() {
 
 run_poll() {
   local dir=$1
-  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    PATH="$dir/fakebin:$BASE_PATH" \
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_HOST_LOG="$dir/gh-host.log" \
+    FM_TEST_GLAB_LOG="$dir/glab.log" PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
 
@@ -762,6 +779,26 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+test_github_enterprise_merge_watch() {
+  local dir url out
+  dir=$(make_case github-enterprise-merge-watch)
+  url=https://github.internal/group/project/pull/17
+  write_task_meta "$dir"
+
+  FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a "$url" >/dev/null 2>/dev/null \
+    || fail "GitHub Enterprise PR could not arm a canonical watcher poll"
+  grep -qxF github.internal "$dir/gh-host.log" \
+    || fail "GitHub Enterprise PR recording did not bind gh to its canonical host"
+
+  : > "$dir/gh-host.log"
+  out=$(FM_TEST_GH_STATE=MERGED run_poll "$dir")
+  [ "$out" = merged ] || fail "GitHub Enterprise watcher did not emit a merged result"
+  grep -qxF github.internal "$dir/gh-host.log" \
+    || fail "GitHub Enterprise watcher did not bind gh to its canonical host"
+  pass "GitHub Enterprise pull requests are recorded and observed on their canonical host"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -3406,6 +3443,7 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_github_enterprise_merge_watch
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_postrename_poll_validation_revokes_and_retries
