@@ -83,6 +83,37 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+add_submodule_at_path() {
+  local work=$1 url=$2 path=$3 section=$4 add_path target
+  add_path=$path
+  case "$path" in
+    *$'\n'*) add_path="core/$section" ;;
+  esac
+  git -C "$work" -c protocol.file.allow=always submodule add -q "$url" "$add_path"
+  if [ "$add_path" != "$path" ]; then
+    target=$(git -C "$work/$add_path" rev-parse HEAD)
+    git -C "$work" config --file .gitmodules --rename-section \
+      "submodule.$add_path" "submodule.$section"
+    git -C "$work" config --file .gitmodules "submodule.$section.path" "$path"
+    mv "$work/$add_path" "$work/$path"
+    git -C "$work" update-index --force-remove -- "$add_path"
+    git -C "$work" update-index --add --cacheinfo 160000 "$target" "$path"
+  fi
+}
+
+initialize_submodule_at_path() {
+  local outer=$1 url=$2 path=$3
+  rm -rf "$outer/$path"
+  git clone --quiet "$url" "$outer/$path"
+  git -C "$outer" submodule absorbgitdirs -- "$path"
+  git -C "$outer" submodule init -- "$path"
+}
+
+newline_only_path() {
+  local path=$1
+  [ -n "$path" ] && [ -z "${path//$'\n'/}" ]
+}
+
 # build_submodule_pair <home> <name> [with-second]: create an outer clone that
 # records the second commit from an origin-backed core/openelis submodule.
 # The paired outer work repo remains at home/work-<name>, so advance_origin can
@@ -90,7 +121,7 @@ head_sha() { git -C "$1" rev-parse HEAD; }
 # The optional second submodule exercises mixed-pointer safety cases.
 # The returned clone initializes the submodule through Git's executable interface.
 build_submodule_pair() {
-  local home=$1 name=$2 with_second=${3:-no} submodule_path=${4:-core/openelis} submodule_add_path inner_work inner_remote work remote clone remote_abs inner_remote_abs
+  local home=$1 name=$2 with_second=${3:-no} submodule_path=${4:-core/openelis} second_submodule_path=${5:-core/second} inner_work inner_remote work remote clone remote_abs inner_remote_abs
   inner_work="$home/submodule-work-$name"
   inner_remote="$home/remotes/$name-openelis.git"
   work="$home/work-$name"
@@ -111,24 +142,11 @@ build_submodule_pair() {
   git init -q "$work"
   git -C "$work" symbolic-ref HEAD refs/heads/main
   commit_file "$work" file.txt v0 C0
-  submodule_add_path=$submodule_path
-  case "$submodule_path" in
-    *$'\n'*) submodule_add_path=core/plain ;;
-  esac
-  git -C "$work" -c protocol.file.allow=always submodule add -q \
-    "file://$inner_remote_abs" "$submodule_add_path"
-  if [ "$submodule_add_path" != "$submodule_path" ]; then
-    git -C "$work" config --file .gitmodules --rename-section \
-      "submodule.$submodule_add_path" submodule.openelis
-    git -C "$work" config --file .gitmodules submodule.openelis.path "$submodule_path"
-    mv "$work/$submodule_add_path" "$work/$submodule_path"
-    git -C "$work" update-index --force-remove -- "$submodule_add_path"
-  fi
+  add_submodule_at_path "$work" "file://$inner_remote_abs" "$submodule_path" openelis
   if [ "$with_second" = with-second ]; then
-    git -C "$work" -c protocol.file.allow=always submodule add -q \
-      "file://$inner_remote_abs" core/second
+    add_submodule_at_path "$work" "file://$inner_remote_abs" "$second_submodule_path" second
   fi
-  git -C "$work" add .gitmodules core
+  git -C "$work" add .gitmodules
   git -C "$work" commit -qm "add submodule"
   git clone --quiet --bare "$work" "$remote"
   git -C "$remote" symbolic-ref HEAD refs/heads/main
@@ -136,8 +154,17 @@ build_submodule_pair() {
   git -C "$work" remote add origin "file://$remote_abs"
   git -C "$work" push -q -u origin main
 
-  git -c protocol.file.allow=always clone --quiet --recurse-submodules \
-    "file://$remote_abs" "$clone"
+  if newline_only_path "$submodule_path" \
+    || { [ "$with_second" = with-second ] && newline_only_path "$second_submodule_path"; }; then
+    git clone --quiet "file://$remote_abs" "$clone"
+    initialize_submodule_at_path "$clone" "file://$inner_remote_abs" "$submodule_path"
+    if [ "$with_second" = with-second ]; then
+      initialize_submodule_at_path "$clone" "file://$inner_remote_abs" "$second_submodule_path"
+    fi
+  else
+    git -c protocol.file.allow=always clone --quiet --recurse-submodules \
+      "file://$remote_abs" "$clone"
+  fi
   printf '%s\n' "$clone"
 }
 
@@ -268,6 +295,18 @@ SH
   chmod +x "$1/git"
 }
 
+git_fail_fast_forward() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+for a in "$@"; do
+  [ "$a" != merge ] || { echo "fatal: simulated fast-forward failure" >&2; exit 1; }
+done
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 # run_sync_guarded <home> <fakebin> <outfile> <errfile> [args...]: run fleet-sync
 # with the fakebin on PATH and stdout/stderr captured separately. Per-test knobs
 # (FM_FLEET_SYNC_PACKED_REFS_LOCK_*, GIT_FETCH_COUNTER) are read from the caller's
@@ -294,7 +333,8 @@ test_detached_clean_ancestor_recovers() {
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "alpha: recovered: re-attached main, synced" "detached-clean-ancestor reports recovered"
+  assert_contains "$out" "alpha: recovered: re-attached main" "detached-clean-ancestor reports recovered"
+  assert_contains "$out" "alpha: synced" "detached-clean-ancestor reports sync"
   assert_not_contains "$out" "STUCK" "recovered case is not flagged STUCK"
   [ "$(git -C "$clone" symbolic-ref --short HEAD 2>/dev/null)" = "main" ] \
     || fail "expected re-attach to main, HEAD still detached"
@@ -422,8 +462,9 @@ test_anchored_submodule_pointer_drift_recovers_and_syncs() {
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "submodule-recover: recovered: restored submodule pointer core/openelis, synced" \
+  assert_contains "$out" "submodule-recover: recovered: restored submodule pointer core/openelis" \
     "anchored submodule pointer drift is visibly recovered"
+  assert_contains "$out" "submodule-recover: synced" "anchored submodule pointer drift still syncs"
   assert_not_contains "$out" "STUCK" "anchored submodule pointer drift is not stuck"
   [ -z "$(git -C "$clone" status --porcelain --ignore-submodules=none)" ] \
     || fail "recovered submodule clone remained dirty"
@@ -455,6 +496,61 @@ test_newline_submodule_pointer_drift_recovers_and_syncs() {
   [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "newline submodule clone did not sync to origin/main"
   pass "newline-named submodule pointer drift is restored and synced"
+}
+
+test_newline_only_submodule_pointer_drift_recovers() {
+  local home clone path inner out expected
+  home=$(new_home)
+  path=$'\n'
+  clone=$(build_submodule_pair "$home" submodule-newline-only no "$path")
+  inner="$clone/$path"
+  [ -z "$(git -C "$clone" status --porcelain --ignore-submodules=none)" ] \
+    || fail "newline-only submodule: fixture did not start clean"
+  git -C "$inner" checkout --detach --quiet origin/main^ \
+    || fail "newline-only submodule: fixture did not create pointer drift"
+  advance_origin "$home" submodule-newline-only C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-newline-only: recovered: restored submodule pointer" \
+    "newline-only submodule pointer drift is visibly recovered"
+  assert_not_contains "$out" "STUCK" "newline-only submodule pointer drift is not stuck"
+  expected=$(git -C "$clone" ls-files --stage -- "$path" | awk '$1 == "160000" { print $2; exit }')
+  [ "$(head_sha "$inner")" = "$expected" ] \
+    || fail "newline-only submodule did not return to its recorded pin"
+  pass "newline-only submodule pointer drift is restored and synced"
+}
+
+test_newline_only_unsafe_outer_dirt_blocks_recovery() {
+  local home clone safe_path unsafe_path safe unsafe out safe_before
+  home=$(new_home)
+  safe_path=$'\n'
+  unsafe_path=$'\n\n'
+  clone=$(build_submodule_pair "$home" submodule-newline-unsafe with-second "$safe_path" "$unsafe_path")
+  safe="$clone/$safe_path"
+  unsafe="$clone/$unsafe_path"
+  [ -z "$(git -C "$clone" status --porcelain --ignore-submodules=none)" ] \
+    || fail "newline-only unsafe outer dirt: fixture did not start clean"
+  git -C "$safe" checkout --detach --quiet origin/main^ \
+    || fail "newline-only unsafe outer dirt: safe submodule did not drift"
+  git -C "$unsafe" checkout --detach --quiet origin/main^ \
+    || fail "newline-only unsafe outer dirt: unsafe submodule did not drift"
+  git -C "$clone" add -- "$unsafe_path" \
+    || fail "newline-only unsafe outer dirt: unsafe pointer did not stage"
+  safe_before=$(head_sha "$safe")
+  advance_origin "$home" submodule-newline-unsafe C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-newline-unsafe: STUCK:" \
+    "newline-only unsafe outer dirt remains stuck"
+  assert_not_contains "$out" "recovered" "newline-only unsafe outer dirt was recovered over"
+  [ "$(head_sha "$safe")" = "$safe_before" ] \
+    || fail "newline-only unsafe outer dirt allowed the eligible pointer reset"
+  if git -C "$clone" diff --cached --quiet -- "$unsafe_path"; then
+    fail "newline-only unsafe outer dirt lost the staged pointer"
+  fi
+  pass "newline-only outer paths keep mixed submodule dirt stuck and untouched"
 }
 
 test_staged_submodule_pointer_is_stuck_untouched() {
@@ -621,6 +717,33 @@ test_recovered_submodule_drift_with_diverged_main_reports_both() {
   [ "$(head_sha "$clone")" != "$(git -C "$clone" rev-parse origin/main)" ] \
     || fail "diverged main clone was fast-forwarded despite the divergence"
   pass "recovered submodule drift on a diverged main reports both recovery and STUCK"
+}
+
+test_recovered_submodule_drift_is_visible_when_fast_forward_fails() {
+  local home clone inner fakebin out_file err_file out pin
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-ff-failure)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  advance_origin "$home" submodule-ff-failure C1
+  pin=$(git -C "$clone" ls-tree HEAD core/openelis | awk '{print $3}')
+  fakebin="$home/fb-merge-failure"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  git_fail_fast_forward "$fakebin"
+  out_file="$home/out-merge-failure"
+  err_file="$home/err-merge-failure"
+
+  run_sync_guarded "$home" "$fakebin" "$out_file" "$err_file" submodule-ff-failure
+  out=$(cat "$out_file")
+
+  case "$out" in
+    *"submodule-ff-failure: recovered: restored submodule pointer core/openelis"$'\n'"submodule-ff-failure: skipped: fast-forward failed"*) ;;
+    *) fail "submodule-ff-failure: recovery was not reported before the failed fast-forward" ;;
+  esac
+  [ "$(head_sha "$inner")" = "$pin" ] \
+    || fail "submodule-ff-failure: recovered pointer did not return to its recorded pin"
+  [ "$(head_sha "$clone")" != "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "submodule-ff-failure: clone fast-forwarded despite the injected failure"
+  pass "submodule recovery stays visible before a later fast-forward failure"
 }
 
 test_pruned_second_submodule_target_refuses_without_partial_recovery() {
@@ -936,6 +1059,8 @@ test_diverged_is_stuck_untouched
 test_on_default_clean_behind_fast_forwards
 test_anchored_submodule_pointer_drift_recovers_and_syncs
 test_newline_submodule_pointer_drift_recovers_and_syncs
+test_newline_only_submodule_pointer_drift_recovers
+test_newline_only_unsafe_outer_dirt_blocks_recovery
 test_staged_submodule_pointer_is_stuck_untouched
 test_dirty_submodule_inner_tree_is_stuck_untouched
 test_untracked_submodule_inner_tree_is_stuck_untouched
@@ -944,6 +1069,7 @@ test_other_outer_dirt_with_submodule_pointer_is_stuck_untouched
 test_mixed_submodule_drift_is_stuck_without_partial_recovery
 test_hidden_untracked_outer_file_with_submodule_drift_is_stuck_untouched
 test_recovered_submodule_drift_with_diverged_main_reports_both
+test_recovered_submodule_drift_is_visible_when_fast_forward_fails
 test_pruned_second_submodule_target_refuses_without_partial_recovery
 test_already_current_unchanged
 test_no_origin_skipped
