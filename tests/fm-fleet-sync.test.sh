@@ -138,6 +138,27 @@ drift_submodule_to_origin_ancestor() {
   git -C "$inner" checkout --detach --quiet origin/main^
 }
 
+# Detach the named submodule at origin/main^ and prune the recorded HEAD pin from
+# its local object store, so the recorded target is no longer check-outable while
+# the drifted ancestor stays anchored on origin. Returns 0 only when the recorded
+# pin is provably absent afterwards; used to exercise the preflight that blocks a
+# partial recovery when a later submodule's target is missing.
+prune_inner_recorded_pin() {
+  local clone=$1 path=$2 pin ancestor
+  pin=$(git -C "$clone" ls-tree HEAD -- "$path" | awk '$1 == "160000" { print $3; exit }')
+  [ -n "$pin" ] || return 1
+  ancestor=$(git -C "$clone/$path" rev-parse --verify --quiet "origin/main^") || return 1
+  [ -n "$ancestor" ] || return 1
+  git -C "$clone/$path" checkout --detach --quiet "$ancestor"
+  git -C "$clone/$path" update-ref refs/remotes/origin/main "$ancestor"
+  git -C "$clone/$path" update-ref -d refs/heads/main 2>/dev/null || true
+  git -C "$clone/$path" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main 2>/dev/null || true
+  git -C "$clone/$path" reflog expire --expire=now --all 2>/dev/null || true
+  git -C "$clone/$path" gc --prune=now --quiet
+  git -C "$clone/$path" cat-file -e "${pin}^{commit}" 2>/dev/null && return 1
+  return 0
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -518,6 +539,82 @@ test_mixed_submodule_drift_is_stuck_without_partial_recovery() {
   pass "mixed submodule drift is reported STUCK without partial recovery"
 }
 
+test_hidden_untracked_outer_file_with_submodule_drift_is_stuck_untouched() {
+  local home clone inner out before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-hidden-untracked)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  # status.showUntrackedFiles=no hides untracked files from a bare `git status`,
+  # so a status query without --untracked-files=all would see only the gitlink
+  # drift and wrongly self-heal over the hidden outer file.
+  git -C "$clone" config status.showUntrackedFiles no
+  printf 'untracked outer\n' > "$clone/outer-untracked.txt"
+  advance_origin "$home" submodule-hidden-untracked C1
+  before=$(head_sha "$inner")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-hidden-untracked: STUCK:" \
+    "a hidden untracked outer file beside gitlink drift stays STUCK"
+  assert_not_contains "$out" "recovered" "hidden untracked file was recovered over"
+  [ "$(head_sha "$inner")" = "$before" ] \
+    || fail "hidden untracked outer file let the submodule pointer be reset"
+  assert_present "$clone/outer-untracked.txt" "hidden untracked outer file was discarded"
+  pass "an outer untracked file hidden by status.showUntrackedFiles=no keeps drift STUCK and untouched"
+}
+
+test_recovered_submodule_drift_with_diverged_main_reports_both() {
+  local home clone inner out pin_before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-diverged)
+  inner="$clone/core/openelis"
+  drift_submodule_to_origin_ancestor "$clone"
+  # Give local main a commit origin does not have, then move origin/main down a
+  # different line, so eligible drift is restored but the clone still diverges.
+  commit_file "$clone" local.txt local "local divergent commit"
+  advance_origin "$home" submodule-diverged C1
+  pin_before=$(git -C "$clone" ls-tree HEAD core/openelis | awk '{print $3}')
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-diverged: recovered: restored submodule pointer core/openelis" \
+    "diverged main still reports the submodule recovery visibly"
+  assert_contains "$out" "submodule-diverged: STUCK:" "diverged main still reports STUCK"
+  assert_contains "$out" "diverged main" "STUCK names the diverged state"
+  [ "$(head_sha "$inner")" = "$pin_before" ] \
+    || fail "diverged-main submodule pointer was not restored to its recorded pin"
+  [ "$(head_sha "$clone")" != "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "diverged main clone was fast-forwarded despite the divergence"
+  pass "recovered submodule drift on a diverged main reports both recovery and STUCK"
+}
+
+test_pruned_second_submodule_target_refuses_without_partial_recovery() {
+  local home clone safe missing out safe_before missing_before
+  home=$(new_home)
+  clone=$(build_submodule_pair "$home" submodule-pruned with-second)
+  safe="$clone/core/openelis"
+  missing="$clone/core/second"
+  drift_submodule_to_origin_ancestor "$clone"
+  prune_inner_recorded_pin "$clone" core/second \
+    || fail "submodule-pruned: fixture did not prune the second submodule's recorded target"
+  safe_before=$(head_sha "$safe")
+  missing_before=$(head_sha "$missing")
+  advance_origin "$home" submodule-pruned C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "submodule-pruned: STUCK:" \
+    "a later submodule with a pruned target stays STUCK"
+  assert_not_contains "$out" "recovered" \
+    "a pruned-target recovery must not report a partial recovery"
+  [ "$(head_sha "$safe")" = "$safe_before" ] \
+    || fail "pruned-target: the present-target submodule was reset (partial recovery)"
+  [ "$(head_sha "$missing")" = "$missing_before" ] \
+    || fail "pruned-target: the pruned-target submodule was reset"
+  pass "a pruned later submodule target refuses recovery without a partial restore"
+}
+
 test_already_current_unchanged() {
   local home clone out before
   home=$(new_home)
@@ -810,6 +907,9 @@ test_untracked_submodule_inner_tree_is_stuck_untouched
 test_unanchored_submodule_head_is_stuck_untouched
 test_other_outer_dirt_with_submodule_pointer_is_stuck_untouched
 test_mixed_submodule_drift_is_stuck_without_partial_recovery
+test_hidden_untracked_outer_file_with_submodule_drift_is_stuck_untouched
+test_recovered_submodule_drift_with_diverged_main_reports_both
+test_pruned_second_submodule_target_refuses_without_partial_recovery
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped

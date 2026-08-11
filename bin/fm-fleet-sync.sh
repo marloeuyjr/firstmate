@@ -300,7 +300,7 @@ outer_dirt_submodule_paths() {
     path=${entry:3}
     git -C "$PROJ" ls-files --stage -- "$path" | grep -q '^160000 ' || return 1
     printf '%s\n' "$path"
-  done < <(git -C "$PROJ" status --porcelain=v1 -z --ignore-submodules=none)
+  done < <(git -C "$PROJ" status --porcelain=v1 -z --ignore-submodules=none --untracked-files=all)
 
   [ "$saw_dirt" = yes ]
 }
@@ -371,7 +371,7 @@ sync_project() {
     if [ -n "$recovered_submodules" ]; then
       recovered_submodules=$(printf '%s\n' "$recovered_submodules" | paste -sd ',' -)
       dirty=no
-      [ -z "$(git -C "$PROJ" status --porcelain --ignore-submodules=none 2>/dev/null | head -1)" ] || dirty=yes
+      [ -z "$(git -C "$PROJ" status --porcelain --ignore-submodules=none --untracked-files=all 2>/dev/null | head -1)" ] || dirty=yes
     fi
   fi
 
@@ -428,6 +428,8 @@ sync_project() {
     return 0
   fi
   if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
+    [ -z "$recovered_submodules" ] \
+      || echo "$label: recovered: restored submodule pointer $recovered_submodules (main diverged)"
     report_stuck "diverged $DEFAULT"
     return 0
   fi

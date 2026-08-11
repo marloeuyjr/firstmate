@@ -7,7 +7,13 @@
 # eligible submodule path on stdout and restores it unless --dry-run is given.
 # It leaves staged gitlink changes, dirty or untracked inner trees, unanchored
 # inner HEADs, and every non-gitlink outer change untouched.
-# A failed checkout prints a refusal and returns non-zero.
+# Before any checkout it preflights every eligible submodule's recorded target
+# object as a locally present commit, so a missing target refuses without
+# altering the worktree (no partial recovery).
+# `git submodule update` checkout progress is written to stderr, so a caller
+# that keeps stdout structured (fleet-sync, which captures the path list) is
+# unaffected while a caller that surfaces stderr (teardown) still observes it.
+# A failed preflight or checkout prints a refusal to stderr and returns non-zero.
 
 fm_submodule_drift_canonical_existing_dir() {
   local target=$1
@@ -19,8 +25,9 @@ fm_submodule_drift_canonical_existing_dir() {
 }
 
 fm_restore_anchored_submodule_pointer_drift() {
-  local dry_run=no worktree config_entry path worktree_abs submodule submodule_head
-  local submodule_git_dir inner_status diff_rc local_anchor_survives
+  local dry_run=no worktree worktree_abs
+  local config_entry path submodule submodule_head submodule_git_dir
+  local inner_status diff_rc local_anchor_survives target eligible entry
 
   if [ "${1:-}" = --dry-run ]; then
     dry_run=yes
@@ -34,6 +41,10 @@ fm_restore_anchored_submodule_pointer_drift() {
   git -C "$worktree" config --file .gitmodules --get-regexp '^submodule\..*\.path$' \
     >/dev/null 2>&1 || return 0
 
+  eligible=
+  # Collect every eligible submodule and preflight its recorded target object
+  # locally before any checkout, so a missing target refuses without altering
+  # the worktree (no partial recovery).
   while IFS= read -r -d '' config_entry; do
     path=${config_entry#*$'\n'}
     [ -n "$path" ] || continue
@@ -74,12 +85,29 @@ fm_restore_anchored_submodule_pointer_drift() {
     else
       continue
     fi
+    target=$(git -C "$worktree" ls-tree HEAD -- "$path" \
+      | awk '$1 == "160000" { print $3; exit }')
+    [ -n "$target" ] || continue
+    if ! git -C "$submodule" cat-file -e "${target}^{commit}" >/dev/null 2>&1; then
+      echo "REFUSED: recorded submodule pointer target $target for $path is not available locally in $worktree." >&2
+      return 1
+    fi
+    eligible+="${path}"$'\n'
+  done < <(git -C "$worktree" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$')
+
+  [ -n "$eligible" ] || return 0
+
+  # Restore each eligible submodule (or only list it under --dry-run). Route the
+  # checkout progress to stderr so a structured-stdout caller stays clean while a
+  # stderr-surfacing caller still observes it.
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
     if [ "$dry_run" = no ]; then
-      if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$path" >/dev/null </dev/null; then
-        echo "REFUSED: cannot restore landed submodule pointer $path in $worktree." >&2
+      if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$entry" >&2 </dev/null; then
+        echo "REFUSED: cannot restore landed submodule pointer $entry in $worktree." >&2
         return 1
       fi
     fi
-    printf '%s\n' "$path"
-  done < <(git -C "$worktree" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$')
+    printf '%s\n' "$entry"
+  done <<< "$eligible"
 }
