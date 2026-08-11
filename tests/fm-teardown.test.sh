@@ -1051,7 +1051,7 @@ test_submodule_pointer_drift_recovery_output_stays_visible() {
 }
 
 test_later_submodule_checkout_failure_rolls_back_earlier_recovery() {
-  local case_dir rc safe blocked safe_before blocked_before blocked_git_dir
+  local case_dir rc safe blocked safe_before safe_ref_before blocked_before blocked_git_dir
   case_dir=$(make_case submodule-checkout-failure)
   write_meta "$case_dir" no-mistakes ship
   add_submodule_pointer_drift "$case_dir"
@@ -1060,7 +1060,9 @@ test_later_submodule_checkout_failure_rolls_back_earlier_recovery() {
   anchor_submodule_head_on_origin "$case_dir" core/second
   safe="$case_dir/wt/core/openelis"
   blocked="$case_dir/wt/core/second"
+  git -C "$safe" checkout --quiet -B rollback-anchor origin/main^
   safe_before=$(git -C "$safe" rev-parse HEAD)
+  safe_ref_before=$(git -C "$safe" symbolic-ref -q HEAD)
   blocked_before=$(git -C "$blocked" rev-parse HEAD)
   blocked_git_dir=$(git -C "$blocked" rev-parse --absolute-git-dir)
   : > "$blocked_git_dir/index.lock"
@@ -1074,6 +1076,8 @@ test_later_submodule_checkout_failure_rolls_back_earlier_recovery() {
   expect_code 1 "$rc" "submodule-checkout-failure: teardown must refuse a failed recovery"
   [ "$(git -C "$safe" rev-parse HEAD)" = "$safe_before" ] \
     || fail "submodule-checkout-failure: the earlier submodule stayed restored"
+  [ "$(git -C "$safe" symbolic-ref -q HEAD)" = "$safe_ref_before" ] \
+    || fail "submodule-checkout-failure: the earlier submodule lost its branch attachment"
   [ "$(git -C "$blocked" rev-parse HEAD)" = "$blocked_before" ] \
     || fail "submodule-checkout-failure: the blocked submodule changed"
   [ -e "$case_dir/state/task-x1.meta" ] \

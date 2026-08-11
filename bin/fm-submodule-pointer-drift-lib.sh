@@ -26,10 +26,11 @@ fm_submodule_drift_canonical_existing_dir() {
 
 fm_restore_anchored_submodule_pointer_drift() {
   local dry_run=no worktree worktree_abs
-  local config_entry path submodule submodule_head submodule_git_dir
+  local config_entry path submodule submodule_head submodule_head_ref submodule_git_dir
   local inner_status diff_rc local_anchor_survives target
-  local index rollback_index original_head
-  local -a original_heads restored_paths restored_heads
+  local index rollback_index rollback_path rollback_head rollback_head_ref
+  local rollback_current_head rollback_current_head_ref
+  local -a original_heads original_head_refs
 
   if [ "${1:-}" = --dry-run ]; then
     dry_run=yes
@@ -73,6 +74,7 @@ fm_restore_anchored_submodule_pointer_drift() {
     fi
     [ -z "$inner_status" ] || continue
     submodule_head=$(git -C "$submodule" rev-parse --verify HEAD 2>/dev/null) || continue
+    submodule_head_ref=$(git -C "$submodule" symbolic-ref -q HEAD 2>/dev/null || true)
     submodule_git_dir=$(git -C "$submodule" rev-parse --absolute-git-dir 2>/dev/null) || continue
     fm_submodule_drift_canonical_existing_dir "$submodule_git_dir" || continue
     submodule_git_dir=$FM_SUBMODULE_DRIFT_CANONICAL_DIR
@@ -100,6 +102,7 @@ fm_restore_anchored_submodule_pointer_drift() {
     fi
     FM_SUBMODULE_POINTER_DRIFT_PATHS+=("$path")
     original_heads+=("$submodule_head")
+    original_head_refs+=("$submodule_head_ref")
   done < <(git -C "$worktree" config --null --file .gitmodules --get-regexp '^submodule\..*\.path$')
 
   [ "${#FM_SUBMODULE_POINTER_DRIFT_PATHS[@]}" -gt 0 ] || return 0
@@ -111,18 +114,28 @@ fm_restore_anchored_submodule_pointer_drift() {
     path=${FM_SUBMODULE_POINTER_DRIFT_PATHS[$index]}
     if [ "$dry_run" = no ]; then
       if ! git -C "$worktree" submodule update --no-fetch --checkout -- "$path" >&2 </dev/null; then
-        for ((rollback_index = ${#restored_paths[@]} - 1; rollback_index >= 0; rollback_index--)); do
-          if ! git -C "$worktree/${restored_paths[$rollback_index]}" checkout --detach --quiet \
-            "${restored_heads[$rollback_index]}" >&2 </dev/null; then
-            echo "REFUSED: cannot roll back submodule pointer ${restored_paths[$rollback_index]} in $worktree." >&2
+        for ((rollback_index = index; rollback_index >= 0; rollback_index--)); do
+          rollback_path=${FM_SUBMODULE_POINTER_DRIFT_PATHS[$rollback_index]}
+          rollback_head=${original_heads[$rollback_index]}
+          rollback_head_ref=${original_head_refs[$rollback_index]}
+          if [ "$rollback_index" -eq "$index" ]; then
+            rollback_current_head=$(git -C "$worktree/$rollback_path" rev-parse --verify HEAD 2>/dev/null || true)
+            rollback_current_head_ref=$(git -C "$worktree/$rollback_path" symbolic-ref -q HEAD 2>/dev/null || true)
+            [ "$rollback_current_head" != "$rollback_head" ] \
+              || [ "$rollback_current_head_ref" != "$rollback_head_ref" ] || continue
+          fi
+          if [ -n "$rollback_head_ref" ]; then
+            if ! { git -C "$worktree/$rollback_path" symbolic-ref HEAD "$rollback_head_ref" \
+              && git -C "$worktree/$rollback_path" reset --hard --quiet "$rollback_head"; } >&2 </dev/null; then
+              echo "REFUSED: cannot roll back submodule pointer $rollback_path in $worktree." >&2
+            fi
+          elif ! git -C "$worktree/$rollback_path" checkout --detach --quiet "$rollback_head" >&2 </dev/null; then
+            echo "REFUSED: cannot roll back submodule pointer $rollback_path in $worktree." >&2
           fi
         done
         echo "REFUSED: cannot restore landed submodule pointer $path in $worktree." >&2
         return 1
       fi
-      restored_paths+=("$path")
-      original_head=${original_heads[$index]}
-      restored_heads+=("$original_head")
     fi
   done
 

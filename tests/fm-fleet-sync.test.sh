@@ -773,14 +773,16 @@ test_pruned_second_submodule_target_refuses_without_partial_recovery() {
 }
 
 test_later_submodule_checkout_failure_rolls_back_earlier_recovery() {
-  local home clone safe blocked out safe_before blocked_before blocked_git_dir
+  local home clone safe blocked out safe_before safe_ref_before blocked_before blocked_git_dir
   home=$(new_home)
   clone=$(build_submodule_pair "$home" submodule-checkout-failure with-second)
   safe="$clone/core/openelis"
   blocked="$clone/core/second"
   drift_submodule_to_origin_ancestor "$clone"
+  git -C "$safe" checkout --quiet -B rollback-anchor origin/main^
   git -C "$blocked" checkout --detach --quiet origin/main^
   safe_before=$(head_sha "$safe")
+  safe_ref_before=$(git -C "$safe" symbolic-ref -q HEAD)
   blocked_before=$(head_sha "$blocked")
   blocked_git_dir=$(git -C "$blocked" rev-parse --absolute-git-dir)
   : > "$blocked_git_dir/index.lock"
@@ -795,6 +797,8 @@ test_later_submodule_checkout_failure_rolls_back_earlier_recovery() {
     "a failed recovery must not report a partial recovery"
   [ "$(head_sha "$safe")" = "$safe_before" ] \
     || fail "checkout failure: the earlier submodule stayed restored"
+  [ "$(git -C "$safe" symbolic-ref -q HEAD)" = "$safe_ref_before" ] \
+    || fail "checkout failure: the earlier submodule lost its branch attachment"
   [ "$(head_sha "$blocked")" = "$blocked_before" ] \
     || fail "checkout failure: the blocked submodule changed"
   pass "a later submodule checkout failure rolls back earlier pointer recovery"
